@@ -1,0 +1,33 @@
+[package]
+name = "oom-watcher"
+version = "0.1.0"
+edition = "2021"
+
+license.workspace = true
+
+[dependencies]
+bytes = "1"
+oom-watcher-common = { path = "../oom-watcher-common", features = ["user"] }
+
+anyhow = { workspace = true, default-features = true }
+aya = { workspace = true, features = ["async_tokio"], default-features = true }
+aya-log = { workspace = true }
+env_logger = { workspace = true }
+libc = { workspace = true }
+log = { workspace = true }
+tokio = { workspace = true, features = [
+    "macros",
+    "rt",
+    "rt-multi-thread",
+    "net",
+    "signal",
+    "time",
+] }
+
+[build-dependencies]
+# Build dependencies for compiling the eBPF program
+# The eBPF crate is built manually in build.rs, not as a dependency
+
+[[bin]]
+name = "oom-watcher"
+path = "src/main.rs"

@@ -1,0 +1,25 @@
+version: '3.8'
+services:
+  oom-watcher:
+    build: .
+    privileged: true
+    cap_add:
+      - SYS_ADMIN
+      - SYS_RESOURCE
+    volumes:
+      - .:/workspace
+    working_dir: /workspace
+    command: ["/workspace/target/release/oom-watcher"]
+    environment:
+      - RUST_LOG=info
+    stdin_open: true
+    tty: true
+
+  oom-trigger:
+    image: python:3.11-slim
+    volumes:
+      - .:/workspace
+    working_dir: /workspace
+    command: ["python3", "/workspace/scripts/trigger_oom.py"]
+    depends_on:
+      - oom-watcher

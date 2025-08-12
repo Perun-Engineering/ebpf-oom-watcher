@@ -1,0 +1,19 @@
+[package]
+name = "oom-watcher-ebpf"
+version = "0.1.0"
+edition = "2021"
+license.workspace = true
+
+[[bin]]
+name = "oom-watcher-ebpf"
+path = "src/main.rs"
+
+[dependencies]
+oom-watcher-common = { path = "../oom-watcher-common" }
+
+aya-ebpf = { workspace = true }
+aya-log-ebpf = { workspace = true }
+
+[build-dependencies]
+which = { workspace = true }
+bindgen = "0.69"
