@@ -1,0 +1,36 @@
+repos:
+  - repo: https://github.com/pre-commit/pre-commit-hooks
+    rev: v4.5.0
+    hooks:
+      - id: trailing-whitespace
+      - id: end-of-file-fixer
+      - id: check-yaml
+        exclude: ^helm/
+      - id: check-added-large-files
+      - id: check-merge-conflict
+      - id: check-toml
+
+  - repo: local
+    hooks:
+      - id: rust-fmt
+        name: Rust Format
+        entry: sh -c 'docker run --rm -v "$PWD":/code -w /code rustlang/rust:nightly sh -c "rustup component add rustfmt && cargo fmt --all --"'
+        language: system
+        files: \.rs$
+        pass_filenames: false
+      - id: rust-clippy
+        name: Rust Clippy
+        entry: sh -c 'docker run --rm -v "$PWD":/code -w /code rustlang/rust:nightly sh -c "rustup component add clippy && cargo clippy --package oom-watcher-common --all-features -- -D warnings"'
+        language: system
+        files: \.rs$
+        pass_filenames: false
+
+  - repo: local
+    hooks:
+      - id: helm-lint
+        name: Helm Lint
+        entry: helm lint
+        language: system
+        files: ^helm/
+        pass_filenames: false
+        args: [helm/oom-watcher]

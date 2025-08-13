@@ -20,16 +20,16 @@ struct MarkVictimArgs {
     common_flags: u8,
     common_preempt_count: u8,
     common_pid: i32,
-    
-    pid: i32,              // offset:8
-    comm_data_loc: u32,    // offset:12 - __data_loc for comm string
-    total_vm: u64,         // offset:16
-    anon_rss: u64,         // offset:24
-    file_rss: u64,         // offset:32
-    shmem_rss: u64,        // offset:40
-    uid: u32,              // offset:48
-    pgtables: u64,         // offset:56
-    oom_score_adj: i16,    // offset:64
+
+    pid: i32,           // offset:8
+    comm_data_loc: u32, // offset:12 - __data_loc for comm string
+    total_vm: u64,      // offset:16
+    anon_rss: u64,      // offset:24
+    file_rss: u64,      // offset:32
+    shmem_rss: u64,     // offset:40
+    uid: u32,           // offset:48
+    pgtables: u64,      // offset:56
+    oom_score_adj: i16, // offset:64
 }
 
 // Use the oom:mark_victim tracepoint which is available on this kernel
@@ -39,10 +39,11 @@ pub fn mark_victim(ctx: TracePointContext) -> u32 {
     let current_tgid = (tgid_pid >> 32) as u32;
 
     // Read tracepoint arguments
-    let args: MarkVictimArgs = match unsafe { bpf_probe_read_kernel(ctx.as_ptr() as *const MarkVictimArgs) } {
-        Ok(args) => args,
-        Err(_) => return 0,
-    };
+    let args: MarkVictimArgs =
+        match unsafe { bpf_probe_read_kernel(ctx.as_ptr() as *const MarkVictimArgs) } {
+            Ok(args) => args,
+            Err(_) => return 0,
+        };
 
     // Extract comm string from __data_loc field
     let mut comm = [0u8; 16];
@@ -50,7 +51,7 @@ pub fn mark_victim(ctx: TracePointContext) -> u32 {
     let comm_ptr = unsafe { (ctx.as_ptr() as *const u8).add(comm_offset) };
     let _ = unsafe { bpf_probe_read_kernel_str_bytes(comm_ptr, &mut comm) };
 
-    let event = OomKillEvent { 
+    let event = OomKillEvent {
         pid: args.pid as u32,
         tgid: current_tgid,
         comm,

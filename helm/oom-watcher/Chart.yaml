@@ -1,0 +1,18 @@
+apiVersion: v2
+name: oom-watcher
+description: eBPF-based OOM watcher for Kubernetes with Prometheus integration
+type: application
+version: 0.1.0
+appVersion: "0.1.0"
+keywords:
+  - ebpf
+  - oom
+  - monitoring
+  - prometheus
+  - kubernetes
+home: https://github.com/Perun-Engineering/ebpf-oom-watcher
+sources:
+  - https://github.com/Perun-Engineering/ebpf-oom-watcher
+maintainers:
+  - name: Perun Engineering
+    url: https://github.com/Perun-Engineering

@@ -1,6 +1,6 @@
+use std::{env, path::PathBuf};
+
 use which::which;
-use std::env;
-use std::path::PathBuf;
 
 /// Building this crate has an undeclared dependency on the `bpf-linker` binary. This would be
 /// better expressed by [artifact-dependencies][bindeps] but issues such as
