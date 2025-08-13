@@ -9,3 +9,38 @@ target/
 **/*.rs.bk
 
 .claude/
+
+# eBPF
+*.o
+*.ll
+
+# IDE
+.vscode/
+.idea/
+*.swp
+*.swo
+
+# OS
+.DS_Store
+Thumbs.db
+
+# Logs
+*.log
+
+# Release artifacts
+*.tgz
+*.tar.gz
+
+# Temporary files
+*.tmp
+*.temp
+
+# Helm
+charts/*.tgz
+
+# Local development
+.env
+.env.local
+
+# Cache
+.cache/

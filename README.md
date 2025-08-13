@@ -1,130 +1,117 @@
-# oom-watcher
+# eBPF OOM Watcher
 
-An eBPF-based Out-of-Memory (OOM) event monitor that uses kernel probes to detect and log OOM kill events in real-time.
+An eBPF-based Out-of-Memory (OOM) event monitor for Kubernetes that captures OOM events with pod and container context, exposing detailed metrics via Prometheus.
 
-## Quick Start with Docker (Recommended)
+## Features
 
-The easiest way to build and develop this project is using Docker, which provides a consistent Linux environment with all required dependencies.
+- **eBPF-based OOM Detection**: Uses kernel tracepoints to capture OOM events in real-time
+- **Kubernetes Integration**: Automatically identifies pods and containers where OOMs occur
+- **Prometheus Metrics**: Comprehensive metrics for monitoring and alerting
+- **DaemonSet Deployment**: Runs on all nodes to provide cluster-wide OOM visibility
+- **Multi-Architecture**: Supports AMD64 and ARM64 platforms
 
-### Prerequisites
+## Quick Start
 
-- Docker installed on your system
-- Git (to clone the repository)
-
-### Building with Docker
-
-1. **Clone the repository:**
-   ```bash
-   git clone <your-repo-url>
-   cd ebpf-oom-watcher
-   ```
-
-2. **Build the Docker image:**
-   ```bash
-   docker build -t ebpf-oom-watcher .
-   ```
-
-3. **Build the project:**
-   ```bash
-   docker run --rm -it -v "$PWD":/workspace -w /workspace ebpf-oom-watcher bash -c "
-   rustup toolchain install nightly --component rust-src &&
-   rustup default nightly &&
-   cargo build --release
-   "
-   ```
-
-4. **Run the OOM watcher:**
-   ```bash
-   docker run --rm -it --privileged -v "$PWD":/workspace -w /workspace ebpf-oom-watcher ./target/release/oom-watcher
-   ```
-
-### Development Workflow
-
-For interactive development, you can start a persistent container:
+### Kubernetes Deployment
 
 ```bash
-# Start a development container
-docker run -it --privileged -v "$PWD":/workspace -w /workspace ebpf-oom-watcher bash
+# Build and push image
+docker build -f Dockerfile.production -t ghcr.io/perun-engineering/ebpf-oom-watcher:latest .
+docker push ghcr.io/perun-engineering/ebpf-oom-watcher:latest
 
-# Inside the container, set up the toolchain (first time only)
-rustup toolchain install nightly --component rust-src
-rustup default nightly
+# Deploy using kubectl
+kubectl apply -f k8s/daemonset.yaml
 
-# Build the project
-cargo build --release
-
-# Run the program
-./target/release/oom-watcher
+# Or using Helm
+helm install oom-watcher helm/oom-watcher \
+  --set image.tag=latest \
+  --set serviceMonitor.enabled=true
 ```
 
-### Testing OOM Events
-
-To test the OOM watcher, you can trigger OOM conditions using the provided script:
+### Local Development
 
 ```bash
-# In the container or on a Linux system
-python3 scripts/trigger_oom.py
-```
+# Set up development environment
+./scripts/setup-dev.sh
 
-## Local Development Environment (Linux Only)
+# Build and test
+./scripts/build-and-test.sh
 
-If you prefer to develop directly on a Linux system without Docker:
-
-### Prerequisites
-
-1. **Rust toolchains:**
-   ```bash
-   rustup toolchain install stable
-   rustup toolchain install nightly --component rust-src
-   ```
-
-2. **eBPF target:**
-   ```bash
-   rustup target add bpfel-unknown-none --toolchain nightly
-   ```
-
-3. **Additional components:**
-   ```bash
-   rustup component add llvm-tools-preview --toolchain nightly
-   ```
-
-4. **BPF linker:**
-   ```bash
-   cargo install bpf-linker
-   ```
-
-### Build & Run
-
-```bash
-# Build the project
-cargo build --release
-
-# Run with sudo (required for eBPF programs)
+# Run locally (requires Linux and root privileges)
 sudo ./target/release/oom-watcher
 ```
 
-## Cross-compiling on macOS
+## Metrics
 
-Cross compilation should work on both Intel and Apple Silicon Macs.
+The OOM Watcher exposes the following Prometheus metrics on port 8080:
+
+- `oom_kills_total{node, namespace, pod, container}` - Total number of OOM kills
+- `oom_kills_per_node_total{node}` - Total OOM kills per node
+- `oom_memory_usage_bytes{node, namespace, pod, container, memory_type}` - Memory usage at OOM time
+- `oom_last_timestamp{node, namespace, pod, container}` - Timestamp of last OOM event
+
+### Example Queries
+
+```promql
+# OOM rate across cluster
+rate(oom_kills_total[5m])
+
+# OOM kills by namespace
+sum by (namespace) (oom_kills_total)
+
+# Memory usage at OOM by type
+oom_memory_usage_bytes{memory_type="anon_rss"}
+```
+
+## Configuration
+
+### Environment Variables
+
+- `NODE_NAME`: Kubernetes node name (automatically set by DaemonSet)
+- `METRICS_PORT`: Port for Prometheus metrics (default: 8080)
+- `RUST_LOG`: Log level (default: info)
+
+### Helm Chart Values
+
+See [helm/oom-watcher/values.yaml](helm/oom-watcher/values.yaml) for all configuration options.
+
+## Development
 
 ### Prerequisites
 
-1. LLVM: `brew install llvm`
-2. C toolchain: `brew install filosottile/musl-cross/musl-cross`
-3. Rust targets:
-   ```bash
-   rustup target add ${ARCH}-unknown-linux-musl
-   ```
+- Docker (recommended) or Linux with eBPF support
+- Rust 1.75+ with nightly toolchain
+- kubectl and Helm for Kubernetes deployment
 
-### Build Command
+### Setup
 
 ```bash
-CC=${ARCH}-linux-musl-gcc cargo build --package oom-watcher --release \
-  --target=${ARCH}-unknown-linux-musl \
-  --config=target.${ARCH}-unknown-linux-musl.linker=\"${ARCH}-linux-musl-gcc\"
+git clone https://github.com/Perun-Engineering/ebpf-oom-watcher.git
+cd ebpf-oom-watcher
+./scripts/setup-dev.sh
 ```
 
-The cross-compiled program `target/${ARCH}-unknown-linux-musl/release/oom-watcher` can be copied to a Linux server or VM and run there.
+### Local Testing
+
+```bash
+# Run pre-commit hooks
+pre-commit run --all-files
+
+# Build for multiple architectures
+cross build --target x86_64-unknown-linux-gnu --release
+cross build --target aarch64-unknown-linux-gnu --release
+
+# Test Helm chart
+helm lint helm/oom-watcher
+helm template helm/oom-watcher | kubectl apply --dry-run=client -f -
+
+# Trigger test OOM (use with caution)
+python3 scripts/trigger_oom.py
+```
+
+## Contributing
+
+See [CONTRIBUTING.md](CONTRIBUTING.md) for development workflow, commit conventions, and contribution guidelines.
 
 ## Project Structure
 
