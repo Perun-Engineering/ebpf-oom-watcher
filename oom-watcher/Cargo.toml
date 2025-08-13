@@ -5,6 +5,10 @@ edition = "2021"
 
 license.workspace = true
 
+[features]
+default = ["ebpf"]
+ebpf = []
+
 [dependencies]
 bytes = "1"
 oom-watcher-common = { path = "../oom-watcher-common", features = ["user"] }

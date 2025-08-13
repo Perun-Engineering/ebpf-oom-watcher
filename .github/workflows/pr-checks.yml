@@ -119,9 +119,8 @@ jobs:
           key: ${{ runner.os }}-cargo-index-${{ hashFiles('**/Cargo.lock') }}
 
       - name: Build for ${{ matrix.target }}
-        run: cross +nightly build --target ${{ matrix.target }} --release
+        run: cross +nightly build --target ${{ matrix.target }} --release --no-default-features
         env:
-          OOM_WATCHER_SKIP_EBPF: "1"
           CARGO_TARGET_BPFEL_UNKNOWN_NONE_LINKER: bpf-linker
 
   semantic-pr:

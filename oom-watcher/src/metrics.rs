@@ -1,8 +1,8 @@
-use std::{collections::HashMap, sync::Arc};
+use std::sync::Arc;
 
 use axum::{extract::State, http::StatusCode, response::Response, routing::get, Router};
 use oom_watcher_common::EnrichedOomEvent;
-use prometheus::{Counter, CounterVec, Encoder, Gauge, GaugeVec, Registry, TextEncoder};
+use prometheus::{CounterVec, GaugeVec, Registry, TextEncoder};
 
 #[derive(Clone)]
 pub struct MetricsCollector {
@@ -118,10 +118,10 @@ impl MetricsCollector {
             .unwrap_or_default()
     }
 
-    pub fn create_server(self, port: u16) -> Router {
+    pub fn create_server(self: Arc<Self>, _port: u16) -> Router {
         Router::new()
             .route("/metrics", get(metrics_handler))
-            .with_state(Arc::new(self))
+            .with_state(self)
     }
 }
 

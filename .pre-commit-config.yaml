@@ -14,7 +14,7 @@ repos:
     hooks:
       - id: rust-fmt
         name: Rust Format
-        entry: sh -c 'docker run --rm -v "$PWD":/code -w /code rustlang/rust:nightly sh -c "rustup component add rustfmt && cargo fmt --all -- --check"'
+        entry: sh -c 'docker run --rm -v "$PWD":/code -w /code rustlang/rust:nightly sh -c "rustup component add rustfmt && cargo fmt --all --"'
         language: system
         files: \.rs$
         pass_filenames: false

@@ -6,6 +6,12 @@ fn main() {
         println!("cargo:warning=OOM_WATCHER_SKIP_EBPF=1 set — skipping eBPF build in build.rs");
         return;
     }
+
+    // Skip eBPF build if the ebpf feature is not enabled
+    if std::env::var("CARGO_FEATURE_EBPF").is_err() {
+        println!("cargo:warning=eBPF feature disabled — skipping eBPF build in build.rs");
+        return;
+    }
     let out_dir = PathBuf::from(env::var("OUT_DIR").unwrap());
     println!("cargo:rerun-if-changed=oom-watcher-ebpf/src");
 
