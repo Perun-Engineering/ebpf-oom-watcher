@@ -121,7 +121,6 @@ docs: update deployment instructions
 
 - **Kubernetes/Helm:**
   - Follow Kubernetes best practices
-  - Validate YAML with yamllint
   - Test Helm chart with `helm lint`
 
 - **Documentation:**
