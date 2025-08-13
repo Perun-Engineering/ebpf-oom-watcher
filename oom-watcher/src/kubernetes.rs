@@ -14,8 +14,7 @@ pub struct KubernetesClient {
 
 impl KubernetesClient {
     pub async fn new() -> Result<Self> {
-        let config = Config::incluster_default()
-            .await
+        let config = Config::incluster()
             .map_err(|e| anyhow!("Failed to create in-cluster config: {}", e))?;
 
         let client = Client::try_from(config)?;
