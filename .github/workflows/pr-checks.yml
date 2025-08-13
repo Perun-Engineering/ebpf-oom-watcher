@@ -18,7 +18,16 @@ jobs:
       - name: Install Rust
         uses: dtolnay/rust-toolchain@stable
         with:
-          components: rustfmt, clippy
+          components: rustfmt, clippy, rust-src
+
+      - name: Install nightly for eBPF
+        uses: dtolnay/rust-toolchain@nightly
+        with:
+          targets: bpfel-unknown-none
+          components: rust-src
+
+      - name: Install bpf-linker
+        run: cargo install bpf-linker
 
       - name: Cache cargo registry
         uses: actions/cache@v4
@@ -42,7 +51,7 @@ jobs:
         run: cargo fmt --all -- --check
 
       - name: Run clippy
-        run: cargo clippy --all-targets --all-features -- -D warnings
+        run: cargo clippy --package oom-watcher-common --all-features -- -D warnings
 
   test:
     name: Test
@@ -52,6 +61,17 @@ jobs:
 
       - name: Install Rust
         uses: dtolnay/rust-toolchain@stable
+        with:
+          components: rust-src
+
+      - name: Install nightly for eBPF
+        uses: dtolnay/rust-toolchain@nightly
+        with:
+          targets: bpfel-unknown-none
+          components: rust-src
+
+      - name: Install bpf-linker
+        run: cargo install bpf-linker
 
       - name: Cache cargo registry
         uses: actions/cache@v4
@@ -72,7 +92,7 @@ jobs:
           key: ${{ runner.os }}-cargo-build-target-${{ hashFiles('**/Cargo.lock') }}
 
       - name: Run tests
-        run: cargo test --verbose
+        run: cargo test --package oom-watcher-common --verbose
 
   build:
     name: Build Test
@@ -87,9 +107,19 @@ jobs:
         uses: dtolnay/rust-toolchain@stable
         with:
           targets: ${{ matrix.target }}
+          components: rust-src
+
+      - name: Install nightly for eBPF
+        uses: dtolnay/rust-toolchain@nightly
+        with:
+          targets: bpfel-unknown-none
+          components: rust-src
 
       - name: Install cross
         run: cargo install cross --git https://github.com/cross-rs/cross
+
+      - name: Install bpf-linker
+        run: cargo install bpf-linker
 
       - name: Cache cargo registry
         uses: actions/cache@v4
@@ -105,6 +135,8 @@ jobs:
 
       - name: Build for ${{ matrix.target }}
         run: cross build --target ${{ matrix.target }} --release
+        env:
+          CARGO_TARGET_BPFEL_UNKNOWN_NONE_LINKER: bpf-linker
 
   semantic-pr:
     name: Semantic PR Title

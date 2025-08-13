@@ -1,20 +1,20 @@
 mod kubernetes;
 mod metrics;
 
+use axum::Server;
 use aya::maps::RingBuf;
 use aya::programs::TracePoint;
 use aya::util::online_cpus;
 use aya::{include_bytes_aligned, Ebpf};
 use aya_log::EbpfLogger;
 use bytes::BytesMut;
-use log::{info, warn, error};
-use oom_watcher_common::{OomKillEvent, EnrichedOomEvent};
-use tokio::{signal, task};
-use std::time::{Duration, SystemTime, UNIX_EPOCH};
-use std::sync::Arc;
-use axum::Server;
 use kubernetes::KubernetesClient;
+use log::{error, info, warn};
 use metrics::MetricsCollector;
+use oom_watcher_common::{EnrichedOomEvent, OomKillEvent};
+use std::sync::Arc;
+use std::time::{Duration, SystemTime, UNIX_EPOCH};
+use tokio::{signal, task};
 
 #[tokio::main]
 async fn main() -> Result<(), Box<dyn std::error::Error>> {
@@ -25,28 +25,37 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     // Initialize Kubernetes client
     let k8s_client = match KubernetesClient::new().await {
         Ok(client) => {
-            info!("Successfully connected to Kubernetes API on node: {}", client.node_name());
+            info!(
+                "Successfully connected to Kubernetes API on node: {}",
+                client.node_name()
+            );
             Some(client)
         }
         Err(e) => {
-            warn!("Failed to connect to Kubernetes API: {}. Running in standalone mode.", e);
+            warn!(
+                "Failed to connect to Kubernetes API: {}. Running in standalone mode.",
+                e
+            );
             None
         }
     };
 
     // Initialize Prometheus metrics collector
     let metrics_collector = Arc::new(MetricsCollector::new());
-    
+
     // Start Prometheus metrics server
     let metrics_port = std::env::var("METRICS_PORT")
         .unwrap_or_else(|_| "8080".to_string())
         .parse::<u16>()
         .unwrap_or(8080);
-        
+
     let app = metrics_collector.clone().create_server(metrics_port);
-    
+
     let metrics_server = task::spawn(async move {
-        info!("Starting Prometheus metrics server on port {}", metrics_port);
+        info!(
+            "Starting Prometheus metrics server on port {}",
+            metrics_port
+        );
         if let Err(e) = Server::bind(&format!("0.0.0.0:{}", metrics_port).parse().unwrap())
             .serve(app.into_make_service())
             .await
@@ -82,17 +91,18 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     if let Err(e) = EbpfLogger::init(&mut bpf) {
         warn!("failed to initialize eBPF logger: {}", e);
     }
-    
-    let program: &mut TracePoint = bpf.program_mut("mark_victim")
+
+    let program: &mut TracePoint = bpf
+        .program_mut("mark_victim")
         .ok_or("Could not find eBPF program 'mark_victim'")?
         .try_into()?;
-    
+
     info!("Loading eBPF program (tracepoint 'oom:mark_victim')...");
     if let Err(e) = program.load() {
         error!("Failed to load eBPF program: {}", e);
         return Err(e.into());
     }
-    
+
     info!("Attaching to tracepoint oom:mark_victim...");
     if let Err(e) = program.attach("oom", "mark_victim") {
         error!("Failed to attach to tracepoint oom:mark_victim: {}", e);
@@ -103,12 +113,14 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     }
     info!("Successfully attached to tracepoint oom:mark_victim");
 
-    let mut ring_buf = RingBuf::try_from(
-        bpf.map_mut("EVENTS").ok_or("Could not find map 'EVENTS'")?,
-    )?;
+    let mut ring_buf =
+        RingBuf::try_from(bpf.map_mut("EVENTS").ok_or("Could not find map 'EVENTS'")?)?;
 
     info!("🔍 OOM Watcher is now active and monitoring for OOM events...");
-    info!("📊 Prometheus metrics available at http://0.0.0.0:{}/metrics", metrics_port);
+    info!(
+        "📊 Prometheus metrics available at http://0.0.0.0:{}/metrics",
+        metrics_port
+    );
     info!("⏹️  Press Ctrl-C to stop monitoring");
 
     // Main event processing loop
@@ -119,12 +131,12 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                 if data.len() >= core::mem::size_of::<OomKillEvent>() {
                     let ptr = data.as_ptr() as *const OomKillEvent;
                     let raw_event = unsafe { ptr.read_unaligned() };
-                    
+
                     let timestamp = SystemTime::now()
                         .duration_since(UNIX_EPOCH)
                         .unwrap_or_default()
                         .as_secs();
-                    
+
                     // Enrich event with Kubernetes metadata
                     let enriched_event = if let Some(ref client) = k8s_client {
                         match client.get_container_info(raw_event.pid).await {
@@ -143,7 +155,9 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                                 warn!("Could not find Kubernetes info for PID {}", raw_event.pid);
                                 EnrichedOomEvent {
                                     raw_event,
-                                    node_name: k8s_client.as_ref().map(|c| c.node_name().to_string()),
+                                    node_name: k8s_client
+                                        .as_ref()
+                                        .map(|c| c.node_name().to_string()),
                                     namespace: None,
                                     pod_name: None,
                                     container_name: None,
@@ -152,7 +166,10 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                                 }
                             }
                             Err(e) => {
-                                warn!("Error getting Kubernetes info for PID {}: {}", raw_event.pid, e);
+                                warn!(
+                                    "Error getting Kubernetes info for PID {}: {}",
+                                    raw_event.pid, e
+                                );
                                 EnrichedOomEvent {
                                     raw_event,
                                     node_name: Some(client.node_name().to_string()),
@@ -175,27 +192,39 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                             timestamp,
                         }
                     };
-                    
+
                     // Record metrics
                     metrics_collector.record_oom_event(&enriched_event);
-                    
+
                     // Log the event
                     let comm_str = std::str::from_utf8(&raw_event.comm)
                         .unwrap_or("?")
                         .trim_end_matches('\0');
-                    
+
                     info!("🚨 OOM EVENT DETECTED:");
                     info!("   Process: {} (PID: {})", comm_str, raw_event.pid);
                     if let Some(ref ns) = enriched_event.namespace {
-                        info!("   Kubernetes: {}/{}/{}", 
-                              ns, 
-                              enriched_event.pod_name.as_deref().unwrap_or("unknown"),
-                              enriched_event.container_name.as_deref().unwrap_or("unknown"));
+                        info!(
+                            "   Kubernetes: {}/{}/{}",
+                            ns,
+                            enriched_event.pod_name.as_deref().unwrap_or("unknown"),
+                            enriched_event
+                                .container_name
+                                .as_deref()
+                                .unwrap_or("unknown")
+                        );
                     }
-                    info!("   Memory: total-vm={}kB anon-rss={}kB file-rss={}kB shmem-rss={}kB", 
-                          raw_event.total_vm, raw_event.anon_rss, raw_event.file_rss, raw_event.shmem_rss);
-                    info!("   User: UID={} pgtables={}kB oom_score_adj={}", 
-                          raw_event.uid, raw_event.pgtables, raw_event.oom_score_adj);
+                    info!(
+                        "   Memory: total-vm={}kB anon-rss={}kB file-rss={}kB shmem-rss={}kB",
+                        raw_event.total_vm,
+                        raw_event.anon_rss,
+                        raw_event.file_rss,
+                        raw_event.shmem_rss
+                    );
+                    info!(
+                        "   User: UID={} pgtables={}kB oom_score_adj={}",
+                        raw_event.uid, raw_event.pgtables, raw_event.oom_score_adj
+                    );
                 } else {
                     warn!("Received short event: {} bytes", data.len());
                 }
@@ -203,11 +232,11 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
             tokio::time::sleep(Duration::from_millis(100)).await;
         }
     });
-    
+
     // Wait for Ctrl-C
     signal::ctrl_c().await?;
     info!("Shutting down OOM Watcher...");
-    
+
     event_processor.abort();
     metrics_server.abort();
 
