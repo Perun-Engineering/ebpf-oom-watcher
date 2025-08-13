@@ -121,6 +121,7 @@ jobs:
       - name: Build for ${{ matrix.target }}
         run: cross +nightly build --target ${{ matrix.target }} --release
         env:
+          OOM_WATCHER_SKIP_EBPF: "1"
           CARGO_TARGET_BPFEL_UNKNOWN_NONE_LINKER: bpf-linker
 
   semantic-pr:
