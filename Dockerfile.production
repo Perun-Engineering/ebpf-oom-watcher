@@ -1,5 +1,5 @@
 # Multi-stage build for eBPF OOM Watcher
-FROM rust:1.75 as builder
+FROM rust:1.78 as builder
 
 # Install eBPF build dependencies
 RUN apt-get update && apt-get install -y \
