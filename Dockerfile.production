@@ -1,5 +1,5 @@
 # Multi-stage build for eBPF OOM Watcher
-FROM rust:1.82 as builder
+FROM rustlang/rust:nightly as builder
 
 # Install eBPF build dependencies
 RUN apt-get update && apt-get install -y \
@@ -17,9 +17,8 @@ RUN apt-get update && apt-get install -y \
 # Install bpf-linker for eBPF compilation
 RUN cargo install bpf-linker --locked
 
-# Add the nightly toolchain and required components
-RUN rustup toolchain install nightly && \
-    rustup component add rust-src --toolchain nightly
+# Add required components for eBPF build
+RUN rustup component add rust-src
 
 # Set the working directory
 WORKDIR /workspace
