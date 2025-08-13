@@ -15,16 +15,11 @@ jobs:
     steps:
       - uses: actions/checkout@v4
 
-      - name: Install Rust
-        uses: dtolnay/rust-toolchain@stable
-        with:
-          components: rustfmt, clippy, rust-src
-
-      - name: Install nightly for eBPF
+      - name: Install Rust nightly
         uses: dtolnay/rust-toolchain@nightly
         with:
           targets: bpfel-unknown-none
-          components: rust-src
+          components: rustfmt, clippy, rust-src
 
       - name: Install bpf-linker
         run: cargo install bpf-linker
@@ -48,10 +43,10 @@ jobs:
           key: ${{ runner.os }}-cargo-build-target-${{ hashFiles('**/Cargo.lock') }}
 
       - name: Check formatting
-        run: cargo fmt --all -- --check
+        run: cargo +nightly fmt --all -- --check
 
-      - name: Run clippy
-        run: cargo clippy --package oom-watcher-common --all-features -- -D warnings
+      - name: Run clippy on common
+        run: cargo +nightly clippy --package oom-watcher-common --all-features -- -D warnings
 
   test:
     name: Test
@@ -59,12 +54,7 @@ jobs:
     steps:
       - uses: actions/checkout@v4
 
-      - name: Install Rust
-        uses: dtolnay/rust-toolchain@stable
-        with:
-          components: rust-src
-
-      - name: Install nightly for eBPF
+      - name: Install Rust nightly
         uses: dtolnay/rust-toolchain@nightly
         with:
           targets: bpfel-unknown-none
@@ -92,7 +82,7 @@ jobs:
           key: ${{ runner.os }}-cargo-build-target-${{ hashFiles('**/Cargo.lock') }}
 
       - name: Run tests
-        run: cargo test --package oom-watcher-common --verbose
+        run: cargo +nightly test --package oom-watcher-common --verbose
 
   build:
     name: Build Test
@@ -103,16 +93,10 @@ jobs:
     steps:
       - uses: actions/checkout@v4
 
-      - name: Install Rust
-        uses: dtolnay/rust-toolchain@stable
-        with:
-          targets: ${{ matrix.target }}
-          components: rust-src
-
-      - name: Install nightly for eBPF
+      - name: Install Rust nightly
         uses: dtolnay/rust-toolchain@nightly
         with:
-          targets: bpfel-unknown-none
+          targets: bpfel-unknown-none,${{ matrix.target }}
           components: rust-src
 
       - name: Install cross
@@ -134,7 +118,7 @@ jobs:
           key: ${{ runner.os }}-cargo-index-${{ hashFiles('**/Cargo.lock') }}
 
       - name: Build for ${{ matrix.target }}
-        run: cross build --target ${{ matrix.target }} --release
+        run: cross +nightly build --target ${{ matrix.target }} --release
         env:
           CARGO_TARGET_BPFEL_UNKNOWN_NONE_LINKER: bpf-linker
 
