@@ -1,3 +1,10 @@
+## [1.0.4](https://github.com/Perun-Engineering/ebpf-oom-watcher/compare/v1.0.3...v1.0.4) (2025-08-13)
+
+
+### Bug Fixes
+
+* use nightly rust image and ensure rust-src component is available ([7ea6d5f](https://github.com/Perun-Engineering/ebpf-oom-watcher/commit/7ea6d5f16ffe138ca185bb95362b0c11b30964c5))
+
 ## [1.0.3](https://github.com/Perun-Engineering/ebpf-oom-watcher/compare/v1.0.2...v1.0.3) (2025-08-13)
 
 
