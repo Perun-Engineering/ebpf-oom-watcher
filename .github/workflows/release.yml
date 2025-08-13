@@ -30,10 +30,10 @@ jobs:
         run: |
           npm install -g semantic-release @semantic-release/changelog @semantic-release/git @semantic-release/github
 
-      - name: Run semantic-release (dry-run)
+      - name: Run semantic-release
         id: semantic-release
         run: |
-          npx semantic-release --dry-run
+          npx semantic-release
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
 
