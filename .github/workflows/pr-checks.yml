@@ -16,8 +16,9 @@ jobs:
       - uses: actions/checkout@v5
 
       - name: Install Rust nightly
-        uses: dtolnay/rust-toolchain@nightly-2024-12-01
+        uses: dtolnay/rust-toolchain@stable
         with:
+          toolchain: nightly-2024-12-01
           targets: bpfel-unknown-none
           components: rustfmt, clippy, rust-src
 
@@ -55,8 +56,9 @@ jobs:
       - uses: actions/checkout@v5
 
       - name: Install Rust nightly
-        uses: dtolnay/rust-toolchain@nightly-2024-12-01
+        uses: dtolnay/rust-toolchain@stable
         with:
+          toolchain: nightly-2024-12-01
           targets: bpfel-unknown-none
           components: rust-src
 
@@ -94,8 +96,9 @@ jobs:
       - uses: actions/checkout@v5
 
       - name: Install Rust nightly
-        uses: dtolnay/rust-toolchain@nightly-2024-12-01
+        uses: dtolnay/rust-toolchain@stable
         with:
+          toolchain: nightly-2024-12-01
           targets: bpfel-unknown-none,${{ matrix.target }}
           components: rust-src
 
