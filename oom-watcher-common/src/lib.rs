@@ -3,6 +3,9 @@
 #[cfg(feature = "user")]
 extern crate std;
 
+#[cfg(feature = "user")]
+use std::string::String;
+
 #[repr(C)]
 #[derive(Copy, Clone, Debug)]
 pub struct OomKillEvent {

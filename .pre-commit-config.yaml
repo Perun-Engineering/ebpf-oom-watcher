@@ -18,6 +18,12 @@ repos:
         language: system
         files: \.rs$
         pass_filenames: false
+      - id: rust-clippy
+        name: Rust Clippy
+        entry: sh -c 'docker run --rm -v "$PWD":/code -w /code rustlang/rust:nightly sh -c "rustup component add clippy && cargo clippy --package oom-watcher-common --all-features -- -D warnings"'
+        language: system
+        files: \.rs$
+        pass_filenames: false
 
   - repo: local
     hooks:
