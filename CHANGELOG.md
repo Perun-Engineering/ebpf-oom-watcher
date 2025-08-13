@@ -1,3 +1,10 @@
+## [1.0.1](https://github.com/Perun-Engineering/ebpf-oom-watcher/compare/v1.0.0...v1.0.1) (2025-08-13)
+
+
+### Bug Fixes
+
+* properly set GitHub Actions outputs for release workflow jobs ([94ae6c4](https://github.com/Perun-Engineering/ebpf-oom-watcher/commit/94ae6c4779c4d9598b3263e81ef8a7126667a906))
+
 # 1.0.0 (2025-08-13)
 
 
