@@ -10,11 +10,14 @@ repos:
       - id: check-merge-conflict
       - id: check-toml
 
-  - repo: https://github.com/doublify/pre-commit-rust
-    rev: v1.0
+  - repo: local
     hooks:
-      - id: fmt
-        args: ['--all', '--']
+      - id: rust-fmt
+        name: Rust Format
+        entry: cargo +nightly fmt
+        language: system
+        files: \.rs$
+        args: ['--all', '--', '--check']
 
   - repo: local
     hooks:
