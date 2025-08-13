@@ -1,3 +1,10 @@
+## [1.0.3](https://github.com/Perun-Engineering/ebpf-oom-watcher/compare/v1.0.2...v1.0.3) (2025-08-13)
+
+
+### Bug Fixes
+
+* use --locked flag for bpf-linker and update to Rust 1.82 ([2ca2bda](https://github.com/Perun-Engineering/ebpf-oom-watcher/commit/2ca2bda0fd31d7fbdeddd7d9672a6cb16e247795))
+
 ## [1.0.2](https://github.com/Perun-Engineering/ebpf-oom-watcher/compare/v1.0.1...v1.0.2) (2025-08-13)
 
 
