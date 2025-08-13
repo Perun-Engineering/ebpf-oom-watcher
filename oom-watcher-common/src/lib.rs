@@ -1,5 +1,8 @@
 #![no_std]
 
+#[cfg(feature = "user")]
+extern crate std;
+
 #[repr(C)]
 #[derive(Copy, Clone, Debug)]
 pub struct OomKillEvent {
@@ -13,4 +16,16 @@ pub struct OomKillEvent {
     pub uid: u32,        // User ID
     pub pgtables: u64,   // Page table size in KB
     pub oom_score_adj: i16, // OOM score adjustment
+}
+
+#[cfg(feature = "user")]
+#[derive(Clone, Debug)]
+pub struct EnrichedOomEvent {
+    pub raw_event: OomKillEvent,
+    pub node_name: Option<String>,
+    pub namespace: Option<String>,
+    pub pod_name: Option<String>,
+    pub container_name: Option<String>,
+    pub container_id: Option<String>,
+    pub timestamp: u64,
 }

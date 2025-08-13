@@ -1,0 +1,65 @@
+# Multi-stage build for eBPF OOM Watcher
+FROM rust:1.75 as builder
+
+# Install eBPF build dependencies
+RUN apt-get update && apt-get install -y \
+    clang \
+    llvm \
+    libclang-dev \
+    build-essential \
+    pkg-config \
+    musl-tools \
+    git \
+    libelf-dev \
+    linux-headers-generic \
+    && rm -rf /var/lib/apt/lists/*
+
+# Install bpf-linker for eBPF compilation
+RUN cargo install bpf-linker
+
+# Add the nightly toolchain and required components
+RUN rustup toolchain install nightly && \
+    rustup component add rust-src --toolchain nightly
+
+# Set the working directory
+WORKDIR /workspace
+
+# Copy the source code
+COPY . .
+
+# Set environment variables for eBPF compilation
+ENV CARGO_TARGET_BPFEL_UNKNOWN_NONE_LINKER=bpf-linker
+ENV RUSTFLAGS="-C target-cpu=native"
+
+# Build the application
+RUN cargo build --release
+
+# Runtime stage
+FROM ubuntu:22.04
+
+# Install runtime dependencies
+RUN apt-get update && apt-get install -y \
+    ca-certificates \
+    libssl3 \
+    && rm -rf /var/lib/apt/lists/* \
+    && groupadd -r oomwatcher \
+    && useradd -r -g oomwatcher oomwatcher
+
+# Copy the built binary
+COPY --from=builder /workspace/target/release/oom-watcher /usr/local/bin/oom-watcher
+
+# Create directory for configuration
+RUN mkdir -p /etc/oom-watcher
+
+# Expose metrics port
+EXPOSE 8080
+
+# Health check
+HEALTHCHECK --interval=30s --timeout=10s --start-period=5s --retries=3 \
+    CMD curl -f http://localhost:8080/metrics || exit 1
+
+# Run as root (required for eBPF)
+USER root
+
+# Set the entrypoint
+ENTRYPOINT ["/usr/local/bin/oom-watcher"]
