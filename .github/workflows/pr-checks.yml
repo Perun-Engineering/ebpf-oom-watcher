@@ -18,8 +18,7 @@ jobs:
       - name: Install Rust nightly
         uses: dtolnay/rust-toolchain@stable
         with:
-          toolchain: nightly-2024-12-01
-          targets: bpfel-unknown-none
+          toolchain: nightly
           components: rustfmt, clippy, rust-src
 
       - name: Install bpf-linker
@@ -58,8 +57,7 @@ jobs:
       - name: Install Rust nightly
         uses: dtolnay/rust-toolchain@stable
         with:
-          toolchain: nightly-2024-12-01
-          targets: bpfel-unknown-none
+          toolchain: nightly
           components: rust-src
 
       - name: Install bpf-linker
@@ -98,8 +96,8 @@ jobs:
       - name: Install Rust nightly
         uses: dtolnay/rust-toolchain@stable
         with:
-          toolchain: nightly-2024-12-01
-          targets: bpfel-unknown-none,${{ matrix.target }}
+          toolchain: nightly
+          targets: ${{ matrix.target }}
           components: rust-src
 
       - name: Install cross
