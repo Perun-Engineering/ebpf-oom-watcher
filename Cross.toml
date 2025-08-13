@@ -1,0 +1,5 @@
+[build.env]
+passthrough = [
+    "OOM_WATCHER_SKIP_EBPF",
+    "CARGO_TARGET_BPFEL_UNKNOWN_NONE_LINKER",
+]
