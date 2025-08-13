@@ -13,8 +13,8 @@ jobs:
     name: Detect Changes
     runs-on: ubuntu-latest
     outputs:
-      should-release: ${{ steps.semantic-release.outputs.new-release-published }}
-      new-version: ${{ steps.semantic-release.outputs.new-release-version }}
+      should-release: ${{ steps.set-outputs.outputs.should-release }}
+      new-version: ${{ steps.set-outputs.outputs.new-version }}
     steps:
       - uses: actions/checkout@v5
         with:
@@ -33,9 +33,20 @@ jobs:
       - name: Run semantic-release
         id: semantic-release
         run: |
-          npx semantic-release
+          npx semantic-release --debug
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Set outputs
+        id: set-outputs
+        run: |
+          if git tag --points-at HEAD | grep -q "v"; then
+            echo "should-release=true" >> $GITHUB_OUTPUT
+            echo "new-version=$(git tag --points-at HEAD | head -1 | sed 's/^v//')" >> $GITHUB_OUTPUT
+          else
+            echo "should-release=false" >> $GITHUB_OUTPUT
+            echo "new-version=" >> $GITHUB_OUTPUT
+          fi
 
   build-and-push:
     name: Build and Push Images
