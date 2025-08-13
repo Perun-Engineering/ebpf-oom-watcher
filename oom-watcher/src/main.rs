@@ -6,7 +6,7 @@ use std::{
     time::{Duration, SystemTime, UNIX_EPOCH},
 };
 
-use axum::Server;
+use axum::serve;
 use aya::{include_bytes_aligned, maps::RingBuf, programs::TracePoint, util::online_cpus, Ebpf};
 use aya_log::EbpfLogger;
 use bytes::BytesMut;
@@ -56,10 +56,10 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
             "Starting Prometheus metrics server on port {}",
             metrics_port
         );
-        if let Err(e) = Server::bind(&format!("0.0.0.0:{}", metrics_port).parse().unwrap())
-            .serve(app.into_make_service())
+        let listener = tokio::net::TcpListener::bind(&format!("0.0.0.0:{}", metrics_port))
             .await
-        {
+            .unwrap();
+        if let Err(e) = serve(listener, app).await {
             error!("Metrics server error: {}", e);
         }
     });

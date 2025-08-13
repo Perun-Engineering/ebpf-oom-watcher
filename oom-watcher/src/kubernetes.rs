@@ -1,4 +1,4 @@
-use std::{collections::HashMap, fs};
+use std::fs;
 
 use anyhow::{anyhow, Result};
 use k8s_openapi::api::core::v1::Pod;
