@@ -1,7 +1,4 @@
-use std::env;
-use std::fs;
-use std::path::PathBuf;
-use std::process::Command;
+use std::{env, fs, path::PathBuf, process::Command};
 
 fn main() {
     // Allow skipping the nested eBPF build to avoid deadlocking on Cargo's global build lock

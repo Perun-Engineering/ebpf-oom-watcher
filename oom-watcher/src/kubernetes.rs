@@ -1,10 +1,10 @@
+use std::{collections::HashMap, fs};
+
 use anyhow::{anyhow, Result};
 use k8s_openapi::api::core::v1::Pod;
 use kube::{Api, Client, Config};
 use log::{debug, warn};
 use regex::Regex;
-use std::collections::HashMap;
-use std::fs;
 
 pub struct KubernetesClient {
     client: Client,

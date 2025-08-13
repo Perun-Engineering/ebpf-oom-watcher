@@ -1,19 +1,19 @@
 mod kubernetes;
 mod metrics;
 
+use std::{
+    sync::Arc,
+    time::{Duration, SystemTime, UNIX_EPOCH},
+};
+
 use axum::Server;
-use aya::maps::RingBuf;
-use aya::programs::TracePoint;
-use aya::util::online_cpus;
-use aya::{include_bytes_aligned, Ebpf};
+use aya::{include_bytes_aligned, maps::RingBuf, programs::TracePoint, util::online_cpus, Ebpf};
 use aya_log::EbpfLogger;
 use bytes::BytesMut;
 use kubernetes::KubernetesClient;
 use log::{error, info, warn};
 use metrics::MetricsCollector;
 use oom_watcher_common::{EnrichedOomEvent, OomKillEvent};
-use std::sync::Arc;
-use std::time::{Duration, SystemTime, UNIX_EPOCH};
 use tokio::{signal, task};
 
 #[tokio::main]

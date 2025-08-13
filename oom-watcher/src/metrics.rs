@@ -1,8 +1,8 @@
+use std::{collections::HashMap, sync::Arc};
+
 use axum::{extract::State, http::StatusCode, response::Response, routing::get, Router};
 use oom_watcher_common::EnrichedOomEvent;
 use prometheus::{Counter, CounterVec, Encoder, Gauge, GaugeVec, Registry, TextEncoder};
-use std::collections::HashMap;
-use std::sync::Arc;
 
 #[derive(Clone)]
 pub struct MetricsCollector {
