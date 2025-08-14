@@ -85,7 +85,7 @@ jobs:
         with:
           context: .
           file: ./Dockerfile.production
-          platforms: linux/amd64
+          platforms: linux/amd64,linux/arm64
           push: true
           tags: ${{ steps.meta.outputs.tags }}
           labels: ${{ steps.meta.outputs.labels }}
@@ -114,7 +114,7 @@ jobs:
           VERSION=${{ needs.detect-changes.outputs.new-version }}
           sed -i "s/^version:.*/version: ${VERSION}/" helm/oom-watcher/Chart.yaml
           sed -i "s/^appVersion:.*/appVersion: \"${VERSION}\"/" helm/oom-watcher/Chart.yaml
-          sed -i "s|repository:.*|repository: ghcr.io/${{ github.repository }}|" helm/oom-watcher/values.yaml
+          sed -i "s|repository:.*|repository: ghcr.io/$(echo "${{ github.repository }}" | tr '[:upper:]' '[:lower:]')|" helm/oom-watcher/values.yaml
           sed -i "s/tag:.*/tag: \"${VERSION}\"/" helm/oom-watcher/values.yaml
 
       - name: Package Helm chart
@@ -124,7 +124,7 @@ jobs:
       - name: Push Helm chart
         run: |
           VERSION=${{ needs.detect-changes.outputs.new-version }}
-          helm push oom-watcher-${VERSION}.tgz oci://ghcr.io/${{ github.repository_owner }}/charts
+          helm push oom-watcher-${VERSION}.tgz oci://ghcr.io/$(echo "${{ github.repository_owner }}" | tr '[:upper:]' '[:lower:]')/charts
 
   create-release:
     name: Create Release
