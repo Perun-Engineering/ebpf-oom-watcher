@@ -1,3 +1,10 @@
+# [1.1.0](https://github.com/Perun-Engineering/ebpf-oom-watcher/compare/v1.0.7...v1.1.0) (2025-08-14)
+
+
+### Features
+
+* enable ARM64 builds alongside AMD64 for multi-architecture support ([e329d33](https://github.com/Perun-Engineering/ebpf-oom-watcher/commit/e329d332acfd9f62fc65e4ecf6e2fb937b34f57c))
+
 ## [1.0.7](https://github.com/Perun-Engineering/ebpf-oom-watcher/compare/v1.0.6...v1.0.7) (2025-08-14)
 
 
