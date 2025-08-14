@@ -79,7 +79,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     let mut bpf = {
         #[cfg(debug_assertions)]
         let bpf = Ebpf::load(include_bytes_aligned!(
-            "../../target/bpfel-unknown-none/debug/oom-watcher-ebpf"
+            "../../target/bpfel-unknown-none/release/oom-watcher-ebpf"
         ))?;
         #[cfg(not(debug_assertions))]
         let bpf = Ebpf::load(include_bytes_aligned!(concat!(

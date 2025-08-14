@@ -1,48 +1,22 @@
-# Multi-stage build for eBPF OOM Watcher
+# Minimal build for eBPF OOM Watcher
 FROM rustlang/rust:nightly as builder
 
-# Install minimal eBPF build dependencies
+# Install only essential eBPF build dependencies
 RUN apt-get update && apt-get install -y \
     clang \
     llvm \
-    libclang-dev \
-    build-essential \
-    pkg-config \
-    git \
     && rm -rf /var/lib/apt/lists/*
 
-# Install bpf-linker and add rust-src
+# Install bpf-linker
 RUN cargo install bpf-linker --locked && \
     rustup component add rust-src
 
-# Set the working directory
 WORKDIR /workspace
-
-# Copy only dependency files first for better caching
-COPY Cargo.toml Cargo.lock ./
-COPY oom-watcher/Cargo.toml ./oom-watcher/
-COPY oom-watcher-ebpf/Cargo.toml ./oom-watcher-ebpf/
-COPY oom-watcher-common/Cargo.toml ./oom-watcher-common/
-
-# Create dummy source files to build dependencies
-RUN mkdir -p oom-watcher/src oom-watcher-ebpf/src oom-watcher-common/src && \
-    echo "fn main() {}" > oom-watcher/src/main.rs && \
-    echo "fn main() {}" > oom-watcher-ebpf/src/main.rs && \
-    echo "// dummy" > oom-watcher-common/src/lib.rs
-
-# Pre-build dependencies (this layer can be cached)
-RUN OOM_WATCHER_SKIP_EBPF=1 cargo build --release --workspace
-RUN rm -rf oom-watcher/src oom-watcher-ebpf/src oom-watcher-common/src
-
-# Copy actual source code
 COPY . .
 
-# Set environment variables for eBPF compilation
+# Build with minimal optimizations for speed
 ENV CARGO_TARGET_BPFEL_UNKNOWN_NONE_LINKER=bpf-linker
-ENV RUSTFLAGS="-C target-cpu=native"
-
-# Build only the main application (dependencies already built)
-RUN cargo build --release --package oom-watcher
+RUN cargo build --package oom-watcher --jobs 1
 
 # Runtime stage
 FROM ubuntu:22.04
@@ -56,7 +30,7 @@ RUN apt-get update && apt-get install -y \
     && useradd -r -g oomwatcher oomwatcher
 
 # Copy the built binary
-COPY --from=builder /workspace/target/release/oom-watcher /usr/local/bin/oom-watcher
+COPY --from=builder /workspace/target/debug/oom-watcher /usr/local/bin/oom-watcher
 
 # Create directory for configuration
 RUN mkdir -p /etc/oom-watcher
