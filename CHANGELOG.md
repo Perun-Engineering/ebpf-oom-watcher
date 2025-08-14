@@ -1,3 +1,10 @@
+## [1.0.6](https://github.com/Perun-Engineering/ebpf-oom-watcher/compare/v1.0.5...v1.0.6) (2025-08-14)
+
+
+### Bug Fixes
+
+* optimize Docker build with dependency caching and reduced scope ([dcad329](https://github.com/Perun-Engineering/ebpf-oom-watcher/commit/dcad3299f792922ca02ec6a0ad8bd1cf42011a38))
+
 ## [1.0.5](https://github.com/Perun-Engineering/ebpf-oom-watcher/compare/v1.0.4...v1.0.5) (2025-08-14)
 
 
