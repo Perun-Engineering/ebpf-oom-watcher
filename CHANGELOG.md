@@ -1,3 +1,10 @@
+# [1.2.0](https://github.com/Perun-Engineering/ebpf-oom-watcher/compare/v1.1.0...v1.2.0) (2025-08-14)
+
+
+### Features
+
+* initialize project with v0.0.1 baseline ([d7f05ad](https://github.com/Perun-Engineering/ebpf-oom-watcher/commit/d7f05addde5dbd7900c86764d533b3853e5fd10b))
+
 # [1.1.0](https://github.com/Perun-Engineering/ebpf-oom-watcher/compare/v1.0.7...v1.1.0) (2025-08-14)
 
 
