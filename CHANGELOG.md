@@ -1,3 +1,10 @@
+## [1.0.5](https://github.com/Perun-Engineering/ebpf-oom-watcher/compare/v1.0.4...v1.0.5) (2025-08-14)
+
+
+### Bug Fixes
+
+* temporarily build only AMD64 images to avoid ARM64 timeout issues ([d5137f3](https://github.com/Perun-Engineering/ebpf-oom-watcher/commit/d5137f395d061615e6056181dc96b913b5ed7d65))
+
 ## [1.0.4](https://github.com/Perun-Engineering/ebpf-oom-watcher/compare/v1.0.3...v1.0.4) (2025-08-13)
 
 
