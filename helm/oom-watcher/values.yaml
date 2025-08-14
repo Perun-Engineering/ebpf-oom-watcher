@@ -1,7 +1,7 @@
 image:
   repository: ghcr.io/perun-engineering/ebpf-oom-watcher
   pullPolicy: IfNotPresent
-  tag: "0.1.0"
+  tag: "0.0.1"
 
 imagePullSecrets: []
 
