@@ -27,7 +27,7 @@ COPY oom-watcher-common/Cargo.toml ./oom-watcher-common/
 # Create dummy source files to build dependencies
 RUN mkdir -p oom-watcher/src oom-watcher-ebpf/src oom-watcher-common/src && \
     echo "fn main() {}" > oom-watcher/src/main.rs && \
-    echo "// dummy" > oom-watcher-ebpf/src/lib.rs && \
+    echo "fn main() {}" > oom-watcher-ebpf/src/main.rs && \
     echo "// dummy" > oom-watcher-common/src/lib.rs
 
 # Pre-build dependencies (this layer can be cached)
