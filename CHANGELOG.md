@@ -1,3 +1,11 @@
+## [1.0.7](https://github.com/Perun-Engineering/ebpf-oom-watcher/compare/v1.0.6...v1.0.7) (2025-08-14)
+
+
+### Bug Fixes
+
+* correct eBPF dummy source file in Dockerfile optimization ([4915c62](https://github.com/Perun-Engineering/ebpf-oom-watcher/commit/4915c6287784ee2ac3f9238f0558de0bafb28d44))
+* optimize Docker build with minimal approach and fix eBPF path issue ([18f5d8a](https://github.com/Perun-Engineering/ebpf-oom-watcher/commit/18f5d8ae0158ab205cc7d12ca27faffded97d81c))
+
 ## [1.0.6](https://github.com/Perun-Engineering/ebpf-oom-watcher/compare/v1.0.5...v1.0.6) (2025-08-14)
 
 
