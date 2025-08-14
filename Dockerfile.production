@@ -1,37 +1,48 @@
 # Multi-stage build for eBPF OOM Watcher
 FROM rustlang/rust:nightly as builder
 
-# Install eBPF build dependencies
+# Install minimal eBPF build dependencies
 RUN apt-get update && apt-get install -y \
     clang \
     llvm \
     libclang-dev \
     build-essential \
     pkg-config \
-    musl-tools \
     git \
-    libelf-dev \
-    linux-headers-generic \
     && rm -rf /var/lib/apt/lists/*
 
-# Install bpf-linker for eBPF compilation
-RUN cargo install bpf-linker --locked
-
-# Add required components for eBPF build
-RUN rustup component add rust-src
+# Install bpf-linker and add rust-src
+RUN cargo install bpf-linker --locked && \
+    rustup component add rust-src
 
 # Set the working directory
 WORKDIR /workspace
 
-# Copy the source code
+# Copy only dependency files first for better caching
+COPY Cargo.toml Cargo.lock ./
+COPY oom-watcher/Cargo.toml ./oom-watcher/
+COPY oom-watcher-ebpf/Cargo.toml ./oom-watcher-ebpf/
+COPY oom-watcher-common/Cargo.toml ./oom-watcher-common/
+
+# Create dummy source files to build dependencies
+RUN mkdir -p oom-watcher/src oom-watcher-ebpf/src oom-watcher-common/src && \
+    echo "fn main() {}" > oom-watcher/src/main.rs && \
+    echo "// dummy" > oom-watcher-ebpf/src/lib.rs && \
+    echo "// dummy" > oom-watcher-common/src/lib.rs
+
+# Pre-build dependencies (this layer can be cached)
+RUN OOM_WATCHER_SKIP_EBPF=1 cargo build --release --workspace
+RUN rm -rf oom-watcher/src oom-watcher-ebpf/src oom-watcher-common/src
+
+# Copy actual source code
 COPY . .
 
 # Set environment variables for eBPF compilation
 ENV CARGO_TARGET_BPFEL_UNKNOWN_NONE_LINKER=bpf-linker
 ENV RUSTFLAGS="-C target-cpu=native"
 
-# Build the application
-RUN cargo build --release
+# Build only the main application (dependencies already built)
+RUN cargo build --release --package oom-watcher
 
 # Runtime stage
 FROM ubuntu:22.04
