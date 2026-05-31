@@ -14,9 +14,9 @@ RUN cargo install bpf-linker --locked && \
 WORKDIR /workspace
 COPY . .
 
-# Build with minimal optimizations for speed
+# Build an optimized release binary
 ENV CARGO_TARGET_BPFEL_UNKNOWN_NONE_LINKER=bpf-linker
-RUN cargo build --package oom-watcher --jobs 1
+RUN cargo build --release --package oom-watcher --jobs 1
 
 # Runtime stage
 FROM ubuntu:22.04
@@ -30,7 +30,7 @@ RUN apt-get update && apt-get install -y \
     && useradd -r -g oomwatcher oomwatcher
 
 # Copy the built binary
-COPY --from=builder /workspace/target/debug/oom-watcher /usr/local/bin/oom-watcher
+COPY --from=builder /workspace/target/release/oom-watcher /usr/local/bin/oom-watcher
 
 # Create directory for configuration
 RUN mkdir -p /etc/oom-watcher
