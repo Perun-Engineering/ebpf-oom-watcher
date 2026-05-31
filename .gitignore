@@ -9,6 +9,7 @@ target/
 **/*.rs.bk
 
 .claude/
+current.txt
 
 # eBPF
 *.o
