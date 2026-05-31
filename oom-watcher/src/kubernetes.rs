@@ -7,7 +7,6 @@ use log::{debug, warn};
 use regex::Regex;
 
 pub struct KubernetesClient {
-    client: Client,
     pods_api: Api<Pod>,
     node_name: String,
 }
@@ -18,12 +17,11 @@ impl KubernetesClient {
             .map_err(|e| anyhow!("Failed to create in-cluster config: {}", e))?;
 
         let client = Client::try_from(config)?;
-        let pods_api: Api<Pod> = Api::all(client.clone());
+        let pods_api: Api<Pod> = Api::all(client);
 
         let node_name = std::env::var("NODE_NAME").unwrap_or_else(|_| "unknown".to_string());
 
         Ok(Self {
-            client,
             pods_api,
             node_name,
         })
