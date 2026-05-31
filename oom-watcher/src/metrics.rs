@@ -129,8 +129,8 @@ async fn metrics_handler(
     State(collector): State<Arc<MetricsCollector>>,
 ) -> Result<Response<String>, StatusCode> {
     let metrics = collector.get_metrics();
-    Ok(Response::builder()
+    Response::builder()
         .header("content-type", "text/plain; version=0.0.4; charset=utf-8")
         .body(metrics)
-        .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?)
+        .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)
 }
