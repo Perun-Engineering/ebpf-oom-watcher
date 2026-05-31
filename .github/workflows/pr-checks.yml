@@ -45,8 +45,10 @@ jobs:
       - name: Check formatting
         run: cargo +nightly fmt --all -- --check
 
-      - name: Run clippy on common
-        run: cargo +nightly clippy --package oom-watcher-common --all-features -- -D warnings
+      - name: Run clippy
+        run: |
+          cargo +nightly clippy --package oom-watcher-common --all-features -- -D warnings
+          cargo +nightly clippy --package oom-watcher --no-default-features --all-targets -- -D warnings
 
   test:
     name: Test
@@ -82,7 +84,9 @@ jobs:
           key: ${{ runner.os }}-cargo-build-target-${{ hashFiles('**/Cargo.lock') }}
 
       - name: Run tests
-        run: cargo +nightly test --package oom-watcher-common --verbose
+        run: |
+          cargo +nightly test --package oom-watcher-common --verbose
+          cargo +nightly test --package oom-watcher --no-default-features --verbose
 
   build:
     name: Build Test
