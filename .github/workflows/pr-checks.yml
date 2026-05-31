@@ -46,9 +46,11 @@ jobs:
         run: cargo +nightly fmt --all -- --check
 
       - name: Run clippy
+        env:
+          CARGO_TARGET_BPFEL_UNKNOWN_NONE_LINKER: bpf-linker
         run: |
           cargo +nightly clippy --package oom-watcher-common --all-features -- -D warnings
-          cargo +nightly clippy --package oom-watcher --no-default-features --all-targets -- -D warnings
+          cargo +nightly clippy --package oom-watcher --all-targets -- -D warnings
 
   test:
     name: Test
@@ -84,9 +86,11 @@ jobs:
           key: ${{ runner.os }}-cargo-build-target-${{ hashFiles('**/Cargo.lock') }}
 
       - name: Run tests
+        env:
+          CARGO_TARGET_BPFEL_UNKNOWN_NONE_LINKER: bpf-linker
         run: |
           cargo +nightly test --package oom-watcher-common --verbose
-          cargo +nightly test --package oom-watcher --no-default-features --verbose
+          cargo +nightly test --package oom-watcher --verbose
 
   build:
     name: Build Test
