@@ -1,3 +1,10 @@
+# [0.1.0](https://github.com/Perun-Engineering/ebpf-oom-watcher/compare/v0.0.6...v0.1.0) (2026-06-01)
+
+
+### Features
+
+* **resolve:** extract Resolution behind a ContainerResolver seam ([#23](https://github.com/Perun-Engineering/ebpf-oom-watcher/issues/23)) ([0de1b1c](https://github.com/Perun-Engineering/ebpf-oom-watcher/commit/0de1b1cafbec95dd9caac53dbd747823f5125db6))
+
 ## [0.0.6](https://github.com/Perun-Engineering/ebpf-oom-watcher/compare/v0.0.5...v0.0.6) (2026-06-01)
 
 ## [0.0.5](https://github.com/Perun-Engineering/ebpf-oom-watcher/compare/v0.0.4...v0.0.5) (2026-06-01)
