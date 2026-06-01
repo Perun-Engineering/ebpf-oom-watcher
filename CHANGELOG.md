@@ -1,3 +1,10 @@
+## [0.0.2](https://github.com/Perun-Engineering/ebpf-oom-watcher/compare/v0.0.1...v0.0.2) (2026-06-01)
+
+
+### Bug Fixes
+
+* ship release binary, widen CI coverage, drop leaked transcript ([#2](https://github.com/Perun-Engineering/ebpf-oom-watcher/issues/2)) ([2f4365f](https://github.com/Perun-Engineering/ebpf-oom-watcher/commit/2f4365f9a4340662c33d11e5c5cb57db9dfffa1a))
+
 # [1.2.0](https://github.com/Perun-Engineering/ebpf-oom-watcher/compare/v1.1.0...v1.2.0) (2025-08-14)
 
 
