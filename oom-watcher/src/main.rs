@@ -50,14 +50,15 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
 
     let app = metrics_collector.clone().create_server(metrics_port);
 
-    let metrics_server = task::spawn(async move {
-        info!(
-            "Starting Prometheus metrics server on port {}",
-            metrics_port
-        );
-        let listener = tokio::net::TcpListener::bind(&format!("0.0.0.0:{}", metrics_port))
-            .await
-            .unwrap();
+    // Bind before spawning so a bind failure fails startup loudly, instead of
+    // panicking inside a detached task and leaving the process running blind.
+    info!(
+        "Starting Prometheus metrics server on port {}",
+        metrics_port
+    );
+    let listener = tokio::net::TcpListener::bind(&format!("0.0.0.0:{}", metrics_port)).await?;
+
+    let mut metrics_server = task::spawn(async move {
         if let Err(e) = serve(listener, app).await {
             error!("Metrics server error: {}", e);
         }
@@ -132,15 +133,23 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     info!("⏹️  Press Ctrl-C to stop monitoring");
 
     // Main event processing loop
-    let event_processor = task::spawn(async move {
+    let mut event_processor = task::spawn(async move {
         #[cfg(feature = "ebpf")]
         {
-            let mut ring_buf = RingBuf::try_from(
-                bpf.map_mut("EVENTS")
-                    .ok_or("Could not find map 'EVENTS'")
-                    .unwrap(),
-            )
-            .unwrap();
+            let events_map = match bpf.map_mut("EVENTS") {
+                Some(map) => map,
+                None => {
+                    error!("Could not find eBPF map 'EVENTS'; event processor stopping");
+                    return;
+                }
+            };
+            let mut ring_buf = match RingBuf::try_from(events_map) {
+                Ok(ring_buf) => ring_buf,
+                Err(e) => {
+                    error!("Failed to open 'EVENTS' ring buffer: {}", e);
+                    return;
+                }
+            };
             loop {
                 while let Some(item) = ring_buf.next() {
                     let data: &[u8] = &item;
@@ -261,12 +270,27 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         }
     });
 
-    // Wait for Ctrl-C
-    signal::ctrl_c().await?;
-    info!("Shutting down OOM Watcher...");
+    // Run until shutdown is requested or a worker task exits unexpectedly. If a
+    // worker dies, return an error so the process exits non-zero and the
+    // DaemonSet restarts the pod, rather than staying up but no longer watching.
+    let outcome: Result<(), Box<dyn std::error::Error>> = tokio::select! {
+        res = signal::ctrl_c() => {
+            res?;
+            info!("Shutting down OOM Watcher...");
+            Ok(())
+        }
+        res = &mut event_processor => {
+            error!("Event processor task exited unexpectedly: {:?}", res);
+            Err("event processor task exited".into())
+        }
+        res = &mut metrics_server => {
+            error!("Metrics server task exited unexpectedly: {:?}", res);
+            Err("metrics server task exited".into())
+        }
+    };
 
     event_processor.abort();
     metrics_server.abort();
 
-    Ok(())
+    outcome
 }

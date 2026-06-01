@@ -2,7 +2,7 @@ use std::fs;
 
 use anyhow::{anyhow, Result};
 use k8s_openapi::api::core::v1::Pod;
-use kube::{Api, Client, Config};
+use kube::{api::ListParams, Api, Client, Config};
 use log::{debug, warn};
 use regex::Regex;
 
@@ -86,17 +86,13 @@ impl KubernetesClient {
         &self,
         container_id: &str,
     ) -> Result<Option<(String, String, String)>> {
-        let pods = self.pods_api.list(&Default::default()).await?;
+        // Scope the query to this node so we don't list every pod in the
+        // cluster on each OOM event; the kubelet supports the spec.nodeName
+        // field selector for pods.
+        let params = ListParams::default().fields(&format!("spec.nodeName={}", self.node_name));
+        let pods = self.pods_api.list(&params).await?;
 
         for pod in pods.items {
-            if let Some(pod_spec) = &pod.spec {
-                if let Some(node_name) = &pod_spec.node_name {
-                    if node_name != &self.node_name {
-                        continue;
-                    }
-                }
-            }
-
             if let Some(status) = &pod.status {
                 if let Some(container_statuses) = &status.container_statuses {
                     for container_status in container_statuses {
