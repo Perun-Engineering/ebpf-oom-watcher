@@ -19,7 +19,7 @@ ENV CARGO_TARGET_BPFEL_UNKNOWN_NONE_LINKER=bpf-linker
 RUN cargo build --release --package oom-watcher --jobs 1
 
 # Runtime stage
-FROM ubuntu:22.04
+FROM ubuntu:26.04
 
 # Install runtime dependencies
 RUN apt-get update && apt-get install -y \
