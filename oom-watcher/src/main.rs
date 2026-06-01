@@ -1,3 +1,4 @@
+mod enrich;
 mod kubernetes;
 mod metrics;
 
@@ -9,10 +10,11 @@ use std::{
 use axum::serve;
 use aya::{include_bytes_aligned, maps::RingBuf, programs::TracePoint, Ebpf};
 use aya_log::EbpfLogger;
+use enrich::enrich;
 use kubernetes::KubernetesClient;
 use log::{error, info, warn};
 use metrics::MetricsCollector;
-use oom_watcher_common::{EnrichedOomEvent, OomKillEvent};
+use oom_watcher_common::OomKillEvent;
 use tokio::{signal, task};
 
 #[tokio::main]
@@ -162,64 +164,34 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                             .unwrap_or_default()
                             .as_secs();
 
-                        // Enrich event with Kubernetes metadata
-                        let enriched_event = if let Some(ref client) = k8s_client {
-                            match client.get_container_info(raw_event.pid).await {
-                                Ok(Some((namespace, pod_name, container_name, container_id))) => {
-                                    EnrichedOomEvent {
-                                        raw_event,
-                                        node_name: Some(client.node_name().to_string()),
-                                        namespace: Some(namespace),
-                                        pod_name: Some(pod_name),
-                                        container_name: Some(container_name),
-                                        container_id: Some(container_id),
-                                        timestamp,
-                                    }
-                                }
+                        // Resolve the killed PID to its container identity, logging the
+                        // two failure modes distinctly, then collapse both to "no
+                        // identity". The node is known iff a client exists, regardless
+                        // of whether resolution succeeded.
+                        let node_name = k8s_client.as_ref().map(|c| c.node_name().to_string());
+                        let identity = match &k8s_client {
+                            Some(client) => match client.get_container_info(raw_event.pid).await {
+                                Ok(Some(identity)) => Some(identity),
                                 Ok(None) => {
                                     warn!(
                                         "Could not find Kubernetes info for PID {}",
                                         raw_event.pid
                                     );
-                                    EnrichedOomEvent {
-                                        raw_event,
-                                        node_name: k8s_client
-                                            .as_ref()
-                                            .map(|c| c.node_name().to_string()),
-                                        namespace: None,
-                                        pod_name: None,
-                                        container_name: None,
-                                        container_id: None,
-                                        timestamp,
-                                    }
+                                    None
                                 }
                                 Err(e) => {
                                     warn!(
                                         "Error getting Kubernetes info for PID {}: {}",
                                         raw_event.pid, e
                                     );
-                                    EnrichedOomEvent {
-                                        raw_event,
-                                        node_name: Some(client.node_name().to_string()),
-                                        namespace: None,
-                                        pod_name: None,
-                                        container_name: None,
-                                        container_id: None,
-                                        timestamp,
-                                    }
+                                    None
                                 }
-                            }
-                        } else {
-                            EnrichedOomEvent {
-                                raw_event,
-                                node_name: None,
-                                namespace: None,
-                                pod_name: None,
-                                container_name: None,
-                                container_id: None,
-                                timestamp,
-                            }
+                            },
+                            None => None,
                         };
+
+                        let enriched_event =
+                            enrich(raw_event, node_name.as_deref(), identity, timestamp);
 
                         // Record metrics
                         metrics_collector.record_oom_event(&enriched_event);
