@@ -16,7 +16,7 @@ An eBPF-based Out-of-Memory (OOM) event monitor for Kubernetes that captures OOM
 
 ```bash
 # Build and push image
-docker build -f Dockerfile.production -t ghcr.io/perun-engineering/ebpf-oom-watcher:latest .
+docker build -t ghcr.io/perun-engineering/ebpf-oom-watcher:latest .
 docker push ghcr.io/perun-engineering/ebpf-oom-watcher:latest
 
 # Deploy using kubectl
@@ -121,16 +121,40 @@ ebpf-oom-watcher/
 ├── oom-watcher-ebpf/      # eBPF kernel program
 ├── oom-watcher-common/    # Shared data structures
 ├── scripts/               # Utility scripts
-├── Dockerfile            # Docker build environment
-└── README.md             # This file
+├── Dockerfile             # Multi-stage build (dev shell + runtime image)
+└── README.md              # This file
 ```
 
 ## Architecture
 
+The watcher runs as a DaemonSet — one pod per node. An eBPF kprobe fires in
+kernel space on every OOM kill and pushes a compact event to userland, which
+enriches it with Kubernetes pod context and exposes Prometheus metrics that the
+cluster's Prometheus scrapes via a ServiceMonitor.
+
+```mermaid
+flowchart LR
+    subgraph node["Kubernetes Node (one DaemonSet pod each)"]
+        subgraph kernel["Kernel space"]
+            K["oom_kill_process"] -->|kprobe| E["eBPF program\nmark_victim"]
+            E -->|EVENTS PerfEventArray| B(("per-CPU\nring buffer"))
+        end
+        subgraph user["Userland (oom-watcher, Tokio)"]
+            B --> R["event reader\n(supervised worker)"]
+            R --> KC["KubernetesClient\nget_pod_info_from_container_id"]
+            KC --> M["MetricsCollector\nrecord_oom_event"]
+            M --> H["/metrics :8080\n(supervised worker)"]
+        end
+    end
+    KC -.->|"pods on this node\n(spec.nodeName field selector)"| API["Kubernetes API"]
+    H -->|scrape| P["Prometheus\n(ServiceMonitor)"]
+```
+
 - **eBPF Program**: Attaches to the `oom_kill_process` kernel function using a kprobe
 - **Userland Program**: Loads the eBPF program and reads OOM events via PerfEventArray
+- **Pod Enrichment**: Resolves the victim's pod/container, querying only pods scheduled on the local node (`spec.nodeName` field selector)
 - **Event Structure**: Captures process details including PID, memory usage, and process name
-- **Async Processing**: Handles events from multiple CPUs concurrently using Tokio
+- **Async Processing**: Handles events from multiple CPUs concurrently using Tokio; the reader and metrics server run as supervised tasks so a worker crash exits the process for a DaemonSet restart
 
 ## Troubleshooting
 

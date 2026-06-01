@@ -29,7 +29,7 @@ echo "🔍 Testing binary startup (will fail without root privileges - this is e
 timeout 5s ./target/release/oom-watcher || true
 
 echo "📋 Available next steps:"
-echo "   1. Build Docker image: docker build -f Dockerfile.production -t oom-watcher:latest ."
+echo "   1. Build Docker image: docker build -t oom-watcher:latest ."
 echo "   2. Deploy to Kubernetes: kubectl apply -f k8s/daemonset.yaml"
 echo "   3. Test locally with root: sudo ./target/release/oom-watcher"
 echo "   4. Trigger test OOM: python3 scripts/trigger_oom.py"

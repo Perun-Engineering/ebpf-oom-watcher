@@ -16,4 +16,3 @@ aya-log-ebpf = { workspace = true }
 
 [build-dependencies]
 which = { workspace = true }
-bindgen = "0.69"
