@@ -1,3 +1,10 @@
+## [0.0.5](https://github.com/Perun-Engineering/ebpf-oom-watcher/compare/v0.0.4...v0.0.5) (2026-06-01)
+
+
+### Bug Fixes
+
+* **deps:** resolve rustls-webpki advisories and apply dependabot updates ([#21](https://github.com/Perun-Engineering/ebpf-oom-watcher/issues/21)) ([b7edc26](https://github.com/Perun-Engineering/ebpf-oom-watcher/commit/b7edc267efd26af91c42bb0352fe7d0d72a479bd))
+
 ## [0.0.4](https://github.com/Perun-Engineering/ebpf-oom-watcher/compare/v0.0.3...v0.0.4) (2026-06-01)
 
 
