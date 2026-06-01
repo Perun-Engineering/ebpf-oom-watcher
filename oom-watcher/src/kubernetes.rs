@@ -4,6 +4,7 @@ use anyhow::{anyhow, Result};
 use k8s_openapi::api::core::v1::Pod;
 use kube::{api::ListParams, Api, Client, Config};
 use log::{debug, warn};
+use oom_watcher_common::ContainerIdentity;
 use regex::Regex;
 
 pub struct KubernetesClient {
@@ -31,18 +32,11 @@ impl KubernetesClient {
         &self.node_name
     }
 
-    pub async fn get_container_info(
-        &self,
-        pid: u32,
-    ) -> Result<Option<(String, String, String, String)>> {
+    pub async fn get_container_info(&self, pid: u32) -> Result<Option<ContainerIdentity>> {
         let container_id = self.get_container_id_from_pid(pid)?;
 
         if let Some(container_id) = container_id {
-            if let Some((namespace, pod_name, container_name)) =
-                self.get_pod_info_from_container_id(&container_id).await?
-            {
-                return Ok(Some((namespace, pod_name, container_name, container_id)));
-            }
+            return self.get_pod_info_from_container_id(&container_id).await;
         }
 
         Ok(None)
@@ -85,7 +79,7 @@ impl KubernetesClient {
     async fn get_pod_info_from_container_id(
         &self,
         container_id: &str,
-    ) -> Result<Option<(String, String, String)>> {
+    ) -> Result<Option<ContainerIdentity>> {
         // Scope the query to this node so we don't list every pod in the
         // cluster on each OOM event; the kubelet supports the spec.nodeName
         // field selector for pods.
@@ -113,7 +107,12 @@ impl KubernetesClient {
                                     .unwrap_or_else(|| "unknown".to_string());
                                 let container_name = container_status.name.clone();
 
-                                return Ok(Some((namespace, pod_name, container_name)));
+                                return Ok(Some(ContainerIdentity {
+                                    namespace,
+                                    pod_name,
+                                    container_name,
+                                    container_id: container_id.to_string(),
+                                }));
                             }
                         }
                     }

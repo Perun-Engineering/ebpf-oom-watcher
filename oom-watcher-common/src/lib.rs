@@ -21,6 +21,19 @@ pub struct OomKillEvent {
     pub oom_score_adj: i16, // OOM score adjustment
 }
 
+/// Kubernetes coordinates of the container a killed process belonged to.
+///
+/// Resolved from a PID by reading `/proc/<pid>/cgroup` for the container id, then
+/// matching that id against the pods scheduled on this node.
+#[cfg(feature = "user")]
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct ContainerIdentity {
+    pub namespace: String,
+    pub pod_name: String,
+    pub container_name: String,
+    pub container_id: String,
+}
+
 #[cfg(feature = "user")]
 #[derive(Clone, Debug)]
 pub struct EnrichedOomEvent {
