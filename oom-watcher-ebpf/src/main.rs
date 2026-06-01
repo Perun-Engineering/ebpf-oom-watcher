@@ -65,7 +65,9 @@ pub fn mark_victim(ctx: TracePointContext) -> u32 {
     };
 
     unsafe {
-        let _ = EVENTS.output(&event, 0);
+        // Access the mutable static through a raw pointer to avoid creating a
+        // shared reference to it (see the `static_mut_refs` lint).
+        let _ = (*core::ptr::addr_of_mut!(EVENTS)).output(&event, 0);
     }
 
     0
