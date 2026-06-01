@@ -1,3 +1,10 @@
+## [0.0.4](https://github.com/Perun-Engineering/ebpf-oom-watcher/compare/v0.0.3...v0.0.4) (2026-06-01)
+
+
+### Bug Fixes
+
+* patch dependency advisories and add supply-chain CI gates ([#4](https://github.com/Perun-Engineering/ebpf-oom-watcher/issues/4)) ([323fd9d](https://github.com/Perun-Engineering/ebpf-oom-watcher/commit/323fd9dd9e5d893477e48fcc3a980724f7982c31))
+
 ## [0.0.3](https://github.com/Perun-Engineering/ebpf-oom-watcher/compare/v0.0.2...v0.0.3) (2026-06-01)
 
 
