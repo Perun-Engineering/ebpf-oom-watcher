@@ -30,7 +30,7 @@ The OOM Watcher exposes the following Prometheus metrics on port 8080:
 
 1. **Build the container image:**
    ```bash
-   docker build -f Dockerfile.production -t oom-watcher:latest .
+   docker build -t oom-watcher:latest .
    ```
 
 2. **Deploy to Kubernetes:**

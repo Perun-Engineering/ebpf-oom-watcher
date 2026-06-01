@@ -1,17 +1,51 @@
-FROM rust:latest
+# syntax=docker/dockerfile:1
+#
+# Single multi-stage build for the eBPF OOM Watcher.
+#   --target dev      interactive toolchain shell (used by docker-compose.yml)
+#   --target runtime  minimal production image (default, used by release CI)
+#
+# Nightly is pinned to match CI (.github/workflows/pr-checks.yml).
 
-RUN apt-get update &&     apt-get install -y clang llvm libclang-dev build-essential pkg-config musl-tools git libelf-dev linux-image-generic bpftool
-
-RUN bpftool btf dump file /sys/kernel/btf/vmlinux format c > /usr/include/vmlinux.h
-
-RUN cargo install bpf-linker
-
-WORKDIR /workspace
-COPY . .
-
-# Only set the linker for the eBPF target
+# ── Shared build base: Rust nightly + eBPF toolchain ─────────────────
+FROM rustlang/rust:nightly AS base
+RUN apt-get update && apt-get install -y --no-install-recommends \
+        clang \
+        llvm \
+        libelf-dev \
+        pkg-config \
+    && rm -rf /var/lib/apt/lists/*
+RUN cargo install bpf-linker --locked && rustup component add rust-src
 ENV CARGO_TARGET_BPFEL_UNKNOWN_NONE_LINKER=bpf-linker
+WORKDIR /workspace
 
-RUN rustup component add rust-src --toolchain nightly
+# ── Builder: compile the optimized release binary ────────────────────
+FROM base AS builder
+COPY . .
+RUN cargo build --release --package oom-watcher --jobs 1
 
+# ── Dev: interactive shell with the full toolchain + bpftool ─────────
+# docker-compose mounts the workspace and builds/runs the binary here.
+FROM base AS dev
+RUN apt-get update && apt-get install -y --no-install-recommends \
+        bpftool \
+        git \
+    && rm -rf /var/lib/apt/lists/*
 CMD ["bash"]
+
+# ── Runtime: minimal production image (default target) ───────────────
+FROM ubuntu:26.04 AS runtime
+# No libssl needed: the binary uses rustls, not OpenSSL.
+RUN apt-get update && apt-get install -y --no-install-recommends \
+        ca-certificates \
+        curl \
+    && rm -rf /var/lib/apt/lists/* \
+    && groupadd -r oomwatcher \
+    && useradd -r -g oomwatcher oomwatcher
+COPY --from=builder /workspace/target/release/oom-watcher /usr/local/bin/oom-watcher
+RUN mkdir -p /etc/oom-watcher
+EXPOSE 8080
+HEALTHCHECK --interval=30s --timeout=10s --start-period=5s --retries=3 \
+    CMD curl -f http://localhost:8080/metrics || exit 1
+# eBPF program loading requires root.
+USER root
+ENTRYPOINT ["/usr/local/bin/oom-watcher"]

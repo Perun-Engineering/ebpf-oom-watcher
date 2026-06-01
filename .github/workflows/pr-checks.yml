@@ -143,19 +143,13 @@ jobs:
           tool: cargo-audit
 
       - name: Run cargo audit
-        # rustls-webpki advisories arrive transitively via kube 0.87 (rustls 0.21);
-        # resolving them needs a kube major bump, which dependabot will surface.
-        run: >
-          cargo audit
-          --ignore RUSTSEC-2026-0104
-          --ignore RUSTSEC-2026-0098
-          --ignore RUSTSEC-2026-0099
+        run: cargo audit
 
   semantic-pr:
     name: Semantic PR Title
     runs-on: ubuntu-latest
     steps:
-      - uses: amannn/action-semantic-pull-request@v5.5.3
+      - uses: amannn/action-semantic-pull-request@v6.1.1
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         with:

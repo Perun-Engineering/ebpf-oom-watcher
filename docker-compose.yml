@@ -1,7 +1,9 @@
 version: '3.8'
 services:
   oom-watcher:
-    build: .
+    build:
+      context: .
+      target: dev
     privileged: true
     cap_add:
       - SYS_ADMIN
