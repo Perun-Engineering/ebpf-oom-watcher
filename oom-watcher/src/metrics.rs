@@ -1,11 +1,23 @@
-use std::sync::Arc;
-
-use axum::{extract::State, http::StatusCode, response::Response, routing::get, Router};
 use oom_watcher_common::EnrichedOomEvent;
 use prometheus::{CounterVec, GaugeVec, Registry, TextEncoder};
 
 use crate::resolve::ResolutionOutcome;
 
+/// The recording seam: how the watch loop reports what it observed, decoupled from
+/// Prometheus. The loop depends on this trait, never on the metrics backend.
+///
+/// `MetricsCollector` is the Prometheus adapter; tests use a spy as the second adapter.
+pub trait MetricsRecorder {
+    /// Count a resolution that did not yield a container identity, keyed by reason.
+    fn record_resolution_outcome(&self, node: &str, outcome: &ResolutionOutcome);
+
+    /// Record an enriched OOM event: kill counts, memory gauges, and timestamp.
+    fn record_oom_event(&self, event: &EnrichedOomEvent);
+}
+
+/// The Prometheus adapter for the [`MetricsRecorder`] seam. Owns the registry and the
+/// metric families; HTTP serving lives in [`crate::http`] so axum does not leak through
+/// this interface.
 #[derive(Clone)]
 pub struct MetricsCollector {
     registry: Registry,
@@ -85,7 +97,31 @@ impl MetricsCollector {
         }
     }
 
-    pub fn record_oom_event(&self, event: &EnrichedOomEvent) {
+    /// Render the registry in the Prometheus text exposition format.
+    pub fn get_metrics(&self) -> String {
+        let encoder = TextEncoder::new();
+        let metric_families = self.registry.gather();
+        encoder
+            .encode_to_string(&metric_families)
+            .unwrap_or_default()
+    }
+}
+
+impl MetricsRecorder for MetricsCollector {
+    /// A `Found` outcome is a no-op — successes are implicit in `oom_kills_total`, so the
+    /// failure rate is `failures / kills` in PromQL.
+    fn record_resolution_outcome(&self, node: &str, outcome: &ResolutionOutcome) {
+        let reason = match outcome {
+            ResolutionOutcome::Found(_) => return,
+            ResolutionOutcome::NotFound => "not_found",
+            ResolutionOutcome::Failed(_) => "error",
+        };
+        self.oom_resolution_failures_total
+            .with_label_values(&[node, reason])
+            .inc();
+    }
+
+    fn record_oom_event(&self, event: &EnrichedOomEvent) {
         let node = event.node_name.as_deref().unwrap_or("unknown");
         let namespace = event.namespace.as_deref().unwrap_or("unknown");
         let pod = event.pod_name.as_deref().unwrap_or("unknown");
@@ -125,44 +161,6 @@ impl MetricsCollector {
             .with_label_values(&[node, namespace, pod, container])
             .set(event.timestamp as f64);
     }
-
-    /// Count a resolution that did not yield a container identity, keyed by reason
-    /// (`not_found` vs `error`). A `Found` outcome is a no-op — successes are implicit
-    /// in `oom_kills_total`, so the failure rate is `failures / kills` in PromQL.
-    pub fn record_resolution_outcome(&self, node: &str, outcome: &ResolutionOutcome) {
-        let reason = match outcome {
-            ResolutionOutcome::Found(_) => return,
-            ResolutionOutcome::NotFound => "not_found",
-            ResolutionOutcome::Failed(_) => "error",
-        };
-        self.oom_resolution_failures_total
-            .with_label_values(&[node, reason])
-            .inc();
-    }
-
-    pub fn get_metrics(&self) -> String {
-        let encoder = TextEncoder::new();
-        let metric_families = self.registry.gather();
-        encoder
-            .encode_to_string(&metric_families)
-            .unwrap_or_default()
-    }
-
-    pub fn create_server(self: Arc<Self>, _port: u16) -> Router {
-        Router::new()
-            .route("/metrics", get(metrics_handler))
-            .with_state(self)
-    }
-}
-
-async fn metrics_handler(
-    State(collector): State<Arc<MetricsCollector>>,
-) -> Result<Response<String>, StatusCode> {
-    let metrics = collector.get_metrics();
-    Response::builder()
-        .header("content-type", "text/plain; version=0.0.4; charset=utf-8")
-        .body(metrics)
-        .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)
 }
 
 #[cfg(test)]
