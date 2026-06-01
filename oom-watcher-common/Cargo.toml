@@ -7,10 +7,9 @@ license.workspace = true
 
 [features]
 default = []
-user = ["aya"]
-
-[dependencies]
-aya = { workspace = true, optional = true }
+# `user` enables the std-backed fields (String identities) for the userspace crate. The
+# shared types are plain #[repr(C)] structs — no aya dependency is needed on either side.
+user = []
 
 [lib]
 path = "src/lib.rs"

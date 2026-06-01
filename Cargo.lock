@@ -950,9 +950,6 @@ dependencies = [
 [[package]]
 name = "oom-watcher-common"
 version = "0.1.0"
-dependencies = [
- "aya",
-]
 
 [[package]]
 name = "oom-watcher-ebpf"

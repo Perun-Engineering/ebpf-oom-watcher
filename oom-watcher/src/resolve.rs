@@ -52,6 +52,36 @@ pub trait ContainerResolver {
     async fn resolve(&self, pid: u32) -> ResolutionOutcome;
 }
 
+/// A second adapter for the Resolution seam — proving the seam is real, and the harness
+/// the watch loop (candidate 1) is exercised through. Compiled only under test.
+#[cfg(test)]
+pub(crate) enum Behavior {
+    Found(ContainerIdentity),
+    NotFound,
+    Fail,
+}
+
+#[cfg(test)]
+pub(crate) struct FakeResolver {
+    pub(crate) node: String,
+    pub(crate) behavior: Behavior,
+}
+
+#[cfg(test)]
+impl ContainerResolver for FakeResolver {
+    fn node_name(&self) -> &str {
+        &self.node
+    }
+
+    async fn resolve(&self, _pid: u32) -> ResolutionOutcome {
+        match &self.behavior {
+            Behavior::Found(id) => ResolutionOutcome::Found(id.clone()),
+            Behavior::NotFound => ResolutionOutcome::NotFound,
+            Behavior::Fail => ResolutionOutcome::Failed(anyhow::anyhow!("api down")),
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -76,33 +106,6 @@ mod tests {
             ResolutionOutcome::Failed(anyhow::anyhow!("boom")).identity(),
             None
         );
-    }
-
-    /// A second adapter — proving the seam is real, not hypothetical. Reused as the
-    /// test harness once the watch loop is extracted (candidate 1).
-    enum Behavior {
-        Found(ContainerIdentity),
-        NotFound,
-        Fail,
-    }
-
-    struct FakeResolver {
-        node: String,
-        behavior: Behavior,
-    }
-
-    impl ContainerResolver for FakeResolver {
-        fn node_name(&self) -> &str {
-            &self.node
-        }
-
-        async fn resolve(&self, _pid: u32) -> ResolutionOutcome {
-            match &self.behavior {
-                Behavior::Found(id) => ResolutionOutcome::Found(id.clone()),
-                Behavior::NotFound => ResolutionOutcome::NotFound,
-                Behavior::Fail => ResolutionOutcome::Failed(anyhow::anyhow!("api down")),
-            }
-        }
     }
 
     #[tokio::test]
