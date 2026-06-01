@@ -1,3 +1,10 @@
+## [0.0.3](https://github.com/Perun-Engineering/ebpf-oom-watcher/compare/v0.0.2...v0.0.3) (2026-06-01)
+
+
+### Bug Fixes
+
+* supervise worker tasks, scope pod query to node, repair healthcheck ([#3](https://github.com/Perun-Engineering/ebpf-oom-watcher/issues/3)) ([92fdd29](https://github.com/Perun-Engineering/ebpf-oom-watcher/commit/92fdd29dc6336597dcc011a403f8237735d1ff24))
+
 ## [0.0.2](https://github.com/Perun-Engineering/ebpf-oom-watcher/compare/v0.0.1...v0.0.2) (2026-06-01)
 
 
