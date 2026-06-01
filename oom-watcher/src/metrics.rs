@@ -4,6 +4,8 @@ use axum::{extract::State, http::StatusCode, response::Response, routing::get, R
 use oom_watcher_common::EnrichedOomEvent;
 use prometheus::{CounterVec, GaugeVec, Registry, TextEncoder};
 
+use crate::resolve::ResolutionOutcome;
+
 #[derive(Clone)]
 pub struct MetricsCollector {
     registry: Registry,
@@ -11,6 +13,7 @@ pub struct MetricsCollector {
     oom_kills_per_node_total: CounterVec,
     oom_memory_usage_bytes: GaugeVec,
     oom_last_timestamp: GaugeVec,
+    oom_resolution_failures_total: CounterVec,
 }
 
 impl MetricsCollector {
@@ -47,6 +50,15 @@ impl MetricsCollector {
         )
         .expect("Failed to create oom_last_timestamp metric");
 
+        let oom_resolution_failures_total = CounterVec::new(
+            prometheus::Opts::new(
+                "oom_resolution_failures_total",
+                "OOM events whose PID could not be resolved to a container, by reason",
+            ),
+            &["node", "reason"],
+        )
+        .expect("Failed to create oom_resolution_failures_total metric");
+
         registry
             .register(Box::new(oom_kills_total.clone()))
             .expect("Failed to register oom_kills_total");
@@ -59,6 +71,9 @@ impl MetricsCollector {
         registry
             .register(Box::new(oom_last_timestamp.clone()))
             .expect("Failed to register oom_last_timestamp");
+        registry
+            .register(Box::new(oom_resolution_failures_total.clone()))
+            .expect("Failed to register oom_resolution_failures_total");
 
         Self {
             registry,
@@ -66,6 +81,7 @@ impl MetricsCollector {
             oom_kills_per_node_total,
             oom_memory_usage_bytes,
             oom_last_timestamp,
+            oom_resolution_failures_total,
         }
     }
 
@@ -110,6 +126,20 @@ impl MetricsCollector {
             .set(event.timestamp as f64);
     }
 
+    /// Count a resolution that did not yield a container identity, keyed by reason
+    /// (`not_found` vs `error`). A `Found` outcome is a no-op — successes are implicit
+    /// in `oom_kills_total`, so the failure rate is `failures / kills` in PromQL.
+    pub fn record_resolution_outcome(&self, node: &str, outcome: &ResolutionOutcome) {
+        let reason = match outcome {
+            ResolutionOutcome::Found(_) => return,
+            ResolutionOutcome::NotFound => "not_found",
+            ResolutionOutcome::Failed(_) => "error",
+        };
+        self.oom_resolution_failures_total
+            .with_label_values(&[node, reason])
+            .inc();
+    }
+
     pub fn get_metrics(&self) -> String {
         let encoder = TextEncoder::new();
         let metric_families = self.registry.gather();
@@ -133,4 +163,35 @@ async fn metrics_handler(
         .header("content-type", "text/plain; version=0.0.4; charset=utf-8")
         .body(metrics)
         .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn counts_failures_by_reason_and_ignores_found() {
+        let collector = MetricsCollector::new();
+
+        collector.record_resolution_outcome("node-1", &ResolutionOutcome::NotFound);
+        collector.record_resolution_outcome("node-1", &ResolutionOutcome::NotFound);
+        collector
+            .record_resolution_outcome("node-1", &ResolutionOutcome::Failed(anyhow::anyhow!("x")));
+        // Found must not touch the failures counter.
+        collector.record_resolution_outcome(
+            "node-1",
+            &ResolutionOutcome::Found(oom_watcher_common::ContainerIdentity {
+                namespace: "p".into(),
+                pod_name: "po".into(),
+                container_name: "c".into(),
+                container_id: "id".into(),
+            }),
+        );
+
+        let out = collector.get_metrics();
+        assert!(
+            out.contains("oom_resolution_failures_total{node=\"node-1\",reason=\"not_found\"} 2")
+        );
+        assert!(out.contains("oom_resolution_failures_total{node=\"node-1\",reason=\"error\"} 1"));
+    }
 }

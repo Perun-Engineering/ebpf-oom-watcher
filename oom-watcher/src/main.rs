@@ -1,6 +1,7 @@
 mod enrich;
 mod kubernetes;
 mod metrics;
+mod resolve;
 
 use std::{
     sync::Arc,
@@ -15,6 +16,7 @@ use kubernetes::KubernetesClient;
 use log::{error, info, warn};
 use metrics::MetricsCollector;
 use oom_watcher_common::OomKillEvent;
+use resolve::{ContainerResolver, ResolutionOutcome};
 use tokio::{signal, task};
 
 #[tokio::main]
@@ -164,30 +166,30 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                             .unwrap_or_default()
                             .as_secs();
 
-                        // Resolve the killed PID to its container identity, logging the
-                        // two failure modes distinctly, then collapse both to "no
-                        // identity". The node is known iff a client exists, regardless
-                        // of whether resolution succeeded.
-                        let node_name = k8s_client.as_ref().map(|c| c.node_name().to_string());
-                        let identity = match &k8s_client {
-                            Some(client) => match client.get_container_info(raw_event.pid).await {
-                                Ok(Some(identity)) => Some(identity),
-                                Ok(None) => {
-                                    warn!(
+                        // Resolve the killed PID to its container identity. Record the
+                        // outcome (so not-found and error are counted distinctly), log
+                        // the two failure modes, then collapse to "no identity". The
+                        // node is known iff a resolver exists, regardless of whether
+                        // resolution succeeded.
+                        let (node_name, identity) = match &k8s_client {
+                            Some(client) => {
+                                let outcome = client.resolve(raw_event.pid).await;
+                                metrics_collector
+                                    .record_resolution_outcome(client.node_name(), &outcome);
+                                match &outcome {
+                                    ResolutionOutcome::NotFound => warn!(
                                         "Could not find Kubernetes info for PID {}",
                                         raw_event.pid
-                                    );
-                                    None
-                                }
-                                Err(e) => {
-                                    warn!(
+                                    ),
+                                    ResolutionOutcome::Failed(e) => warn!(
                                         "Error getting Kubernetes info for PID {}: {}",
                                         raw_event.pid, e
-                                    );
-                                    None
+                                    ),
+                                    ResolutionOutcome::Found(_) => {}
                                 }
-                            },
-                            None => None,
+                                (Some(client.node_name().to_string()), outcome.identity())
+                            }
+                            None => (None, None),
                         };
 
                         let enriched_event =

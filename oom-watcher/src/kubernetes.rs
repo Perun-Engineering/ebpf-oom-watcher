@@ -7,6 +7,8 @@ use log::{debug, warn};
 use oom_watcher_common::ContainerIdentity;
 use regex::Regex;
 
+use crate::resolve::{ContainerResolver, ResolutionOutcome};
+
 pub struct KubernetesClient {
     pods_api: Api<Pod>,
     node_name: String,
@@ -20,16 +22,17 @@ impl KubernetesClient {
         let client = Client::try_from(config)?;
         let pods_api: Api<Pod> = Api::all(client);
 
-        let node_name = std::env::var("NODE_NAME").unwrap_or_else(|_| "unknown".to_string());
+        // Require NODE_NAME rather than defaulting to "unknown": a wrong node scopes
+        // the spec.nodeName field selector to a node with no pods, so every lookup
+        // would silently return NotFound. Failing here drops us to standalone mode.
+        let node_name = std::env::var("NODE_NAME").map_err(|_| {
+            anyhow!("NODE_NAME is unset; the DaemonSet must expose it via the downward API")
+        })?;
 
         Ok(Self {
             pods_api,
             node_name,
         })
-    }
-
-    pub fn node_name(&self) -> &str {
-        &self.node_name
     }
 
     pub async fn get_container_info(&self, pid: u32) -> Result<Option<ContainerIdentity>> {
@@ -122,5 +125,21 @@ impl KubernetesClient {
 
         warn!("Could not find pod info for container ID: {}", container_id);
         Ok(None)
+    }
+}
+
+/// The in-cluster adapter for the Resolution seam. Maps `get_container_info`'s
+/// `Result<Option<_>>` onto the three [`ResolutionOutcome`] variants.
+impl ContainerResolver for KubernetesClient {
+    fn node_name(&self) -> &str {
+        &self.node_name
+    }
+
+    async fn resolve(&self, pid: u32) -> ResolutionOutcome {
+        match self.get_container_info(pid).await {
+            Ok(Some(identity)) => ResolutionOutcome::Found(identity),
+            Ok(None) => ResolutionOutcome::NotFound,
+            Err(e) => ResolutionOutcome::Failed(e),
+        }
     }
 }
