@@ -26,7 +26,7 @@ env_logger = { version = "0.11.5", default-features = false }
 libc = { version = "0.2.174", default-features = false }
 log = { version = "0.4.32", default-features = false }
 tokio = { version = "1.40.0", default-features = false }
-which = { version = "8.0.3", default-features = false }
+which = { version = "8.0.3", default-features = false, features = ["real-sys"] }
 
 # eBPF programs must use panic = "abort"
 [profile.dev]
