@@ -31,7 +31,7 @@ tokio = { workspace = true, features = [
 ] }
 
 # Kubernetes and Prometheus dependencies
-kube = { version = "3.1", features = ["client", "config", "derive"] }
+kube = { version = "4.0", features = ["client", "config", "derive"] }
 k8s-openapi = { version = "0.27", features = ["v1_31"] }
 # default-features disabled to drop the unmaintained protobuf 2.x encoder
 # (RUSTSEC-2024-0437); only the text exposition format (TextEncoder) is used.
