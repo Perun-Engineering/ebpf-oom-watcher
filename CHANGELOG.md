@@ -1,3 +1,13 @@
+## [0.1.5](https://github.com/Perun-Engineering/ebpf-oom-watcher/compare/v0.1.4...v0.1.5) (2026-07-06)
+
+
+### Bug Fixes
+
+* bump anyhow from 1.0.102 to 1.0.103 ([fbaa0ba](https://github.com/Perun-Engineering/ebpf-oom-watcher/commit/fbaa0badab545b1a2c931213f47636a59feeeec2))
+* bump bytes from 1.11.1 to 1.12.0 ([64df8bf](https://github.com/Perun-Engineering/ebpf-oom-watcher/commit/64df8bf3d263aead2a4fb8e1bab2fd2fc244099c))
+* bump env_logger from 0.11.10 to 0.11.11 ([e8ec95f](https://github.com/Perun-Engineering/ebpf-oom-watcher/commit/e8ec95fa9b5f8979efdb18dbe96fbe2113250a72))
+* bump log from 0.4.32 to 0.4.33 ([dc0bb4a](https://github.com/Perun-Engineering/ebpf-oom-watcher/commit/dc0bb4acd211305c98705abf59764ecd6bf8c87d))
+
 ## [0.1.4](https://github.com/Perun-Engineering/ebpf-oom-watcher/compare/v0.1.3...v0.1.4) (2026-07-06)
 
 
