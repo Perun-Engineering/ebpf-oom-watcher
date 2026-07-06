@@ -16,7 +16,7 @@ bytes = "1.11"
 oom-watcher-common = { path = "../oom-watcher-common", features = ["user"] }
 
 anyhow = { workspace = true, default-features = true }
-aya = { workspace = true, features = ["async_tokio"], default-features = true, optional = true }
+aya = { workspace = true, default-features = true, optional = true }
 aya-log = { workspace = true, optional = true }
 env_logger = { workspace = true }
 libc = { workspace = true, optional = true }
