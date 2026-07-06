@@ -21,7 +21,11 @@ WORKDIR /workspace
 # ── Builder: compile the optimized release binary ────────────────────
 FROM base AS builder
 COPY . .
-RUN cargo build --release --package oom-watcher --jobs 1
+# rustup component add rust-src: re-runs here (not just in 'base') because the
+# base layer may be GHA-cached with an older nightly; build.rs's inner
+# 'cargo +nightly build' syncs to the latest nightly but skips optional
+# components, leaving rust-src absent and breaking '-Z build-std=core'.
+RUN rustup component add rust-src && cargo build --release --package oom-watcher --jobs 1
 
 # ── Dev: interactive shell with the full toolchain + bpftool ─────────
 # docker-compose mounts the workspace and builds/runs the binary here.
