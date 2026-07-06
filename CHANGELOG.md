@@ -1,3 +1,10 @@
+## [0.1.4](https://github.com/Perun-Engineering/ebpf-oom-watcher/compare/v0.1.3...v0.1.4) (2026-07-06)
+
+
+### Bug Fixes
+
+* bump which from 8.0.3 to 8.0.4 ([0a8f169](https://github.com/Perun-Engineering/ebpf-oom-watcher/commit/0a8f1690d7e00749c4ef833d3a6091336f710f13))
+
 ## [0.1.3](https://github.com/Perun-Engineering/ebpf-oom-watcher/compare/v0.1.2...v0.1.3) (2026-06-14)
 
 
