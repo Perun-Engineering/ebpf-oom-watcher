@@ -1,3 +1,15 @@
+## [0.1.6](https://github.com/Perun-Engineering/ebpf-oom-watcher/compare/v0.1.5...v0.1.6) (2026-07-06)
+
+
+### Bug Fixes
+
+* bump kube from 3.1.0 to 4.0.0 ([f7cea32](https://github.com/Perun-Engineering/ebpf-oom-watcher/commit/f7cea320018762657aaf0b37dec9e0fbe3e65426))
+* bump the aya group with 3 updates ([b59fd94](https://github.com/Perun-Engineering/ebpf-oom-watcher/commit/b59fd94f17bb426fbf607abbd078d15e9d3dfc78))
+* **deps:** co-bump aya workspace to 0.14.0 to match aya-log 0.3.0 ([ccbacd1](https://github.com/Perun-Engineering/ebpf-oom-watcher/commit/ccbacd14b16df5c8f50077f143dc3d8154e6d74c)), closes [#42](https://github.com/Perun-Engineering/ebpf-oom-watcher/issues/42)
+* **deps:** co-bump k8s-openapi to 0.28 for kube 4.0 compatibility ([4dc8117](https://github.com/Perun-Engineering/ebpf-oom-watcher/commit/4dc8117d022a03942d000513549d58c1d496bd2f))
+* **deps:** remove aya async_tokio feature — removed in aya 0.14.0 ([d35db89](https://github.com/Perun-Engineering/ebpf-oom-watcher/commit/d35db89b790455a5a5512920bc9f3da99225839f))
+* **ebpf:** add turbofish annotation for RingBuf::output with aya 0.2.1 ([be46be3](https://github.com/Perun-Engineering/ebpf-oom-watcher/commit/be46be3919a31f222e9f4cc27b0ab1a8393fce4e))
+
 ## [0.1.5](https://github.com/Perun-Engineering/ebpf-oom-watcher/compare/v0.1.4...v0.1.5) (2026-07-06)
 
 
