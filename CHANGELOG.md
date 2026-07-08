@@ -1,3 +1,10 @@
+## [0.1.7](https://github.com/Perun-Engineering/ebpf-oom-watcher/compare/v0.1.6...v0.1.7) (2026-07-08)
+
+
+### Bug Fixes
+
+* **docker:** re-add rust-src in builder stage to survive GHA nightly cache skew ([a292a24](https://github.com/Perun-Engineering/ebpf-oom-watcher/commit/a292a24f11bbcab1de081f5b3e61bad589333f31))
+
 ## [0.1.6](https://github.com/Perun-Engineering/ebpf-oom-watcher/compare/v0.1.5...v0.1.6) (2026-07-06)
 
 
