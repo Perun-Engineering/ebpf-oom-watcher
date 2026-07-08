@@ -1,3 +1,10 @@
+## [0.1.9](https://github.com/Perun-Engineering/ebpf-oom-watcher/compare/v0.1.8...v0.1.9) (2026-07-08)
+
+
+### Bug Fixes
+
+* trigger release to verify native-arch parallel build pipeline ([e8dba0b](https://github.com/Perun-Engineering/ebpf-oom-watcher/commit/e8dba0b9f6a74879fc3184fef5dca9e05a2c77ed))
+
 ## [0.1.8](https://github.com/Perun-Engineering/ebpf-oom-watcher/compare/v0.1.7...v0.1.8) (2026-07-08)
 
 
