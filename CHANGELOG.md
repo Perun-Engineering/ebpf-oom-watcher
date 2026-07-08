@@ -1,3 +1,11 @@
+## [0.1.10](https://github.com/Perun-Engineering/ebpf-oom-watcher/compare/v0.1.9...v0.1.10) (2026-07-08)
+
+
+### Bug Fixes
+
+* **core:** give nested eBPF build.rs cargo invocation its own target dir ([7edde0b](https://github.com/Perun-Engineering/ebpf-oom-watcher/commit/7edde0b488c9de955ceb64fd395dbd883bdef874))
+* **core:** update hardcoded debug-profile eBPF object path ([07f050e](https://github.com/Perun-Engineering/ebpf-oom-watcher/commit/07f050e7953d582907dcb62f64db99700a093512))
+
 ## [0.1.9](https://github.com/Perun-Engineering/ebpf-oom-watcher/compare/v0.1.8...v0.1.9) (2026-07-08)
 
 
