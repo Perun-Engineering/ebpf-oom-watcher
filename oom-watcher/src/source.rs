@@ -40,7 +40,7 @@ mod ebpf_source {
 
             #[cfg(debug_assertions)]
             let mut bpf = Ebpf::load(include_bytes_aligned!(
-                "../../target/bpfel-unknown-none/release/oom-watcher-ebpf"
+                "../../target/ebpf-subbuild/bpfel-unknown-none/release/oom-watcher-ebpf"
             ))?;
             #[cfg(not(debug_assertions))]
             let mut bpf = Ebpf::load(include_bytes_aligned!(concat!(
