@@ -25,6 +25,12 @@ fn main() {
 
     println!("cargo:warning=Building eBPF program...");
 
+    // Build into a dedicated target dir: the outer `cargo build` holds the
+    // lock on the workspace's target dir for the whole session, and this
+    // nested cargo invocation would otherwise block acquiring the same lock
+    // (build.rs, in turn, blocks waiting for this process) — a deadlock.
+    let ebpf_target_dir = workspace_root.join("target/ebpf-subbuild");
+
     // Build the eBPF program
     let mut cmd = Command::new("cargo");
     cmd.arg("+nightly")
@@ -34,6 +40,8 @@ fn main() {
         .arg("oom-watcher-ebpf")
         .arg("--target")
         .arg("bpfel-unknown-none")
+        .arg("--target-dir")
+        .arg(&ebpf_target_dir)
         .arg("-Z")
         .arg("build-std=core")
         .current_dir(&workspace_root);
@@ -53,9 +61,9 @@ fn main() {
 
     // Look for the eBPF binary in multiple possible locations
     let possible_paths = vec![
-        workspace_root.join("target/bpfel-unknown-none/release/oom-watcher-ebpf"),
-        PathBuf::from("../target/bpfel-unknown-none/release/oom-watcher-ebpf"),
-        PathBuf::from("target/bpfel-unknown-none/release/oom-watcher-ebpf"),
+        ebpf_target_dir.join("bpfel-unknown-none/release/oom-watcher-ebpf"),
+        PathBuf::from("../target/ebpf-subbuild/bpfel-unknown-none/release/oom-watcher-ebpf"),
+        PathBuf::from("target/ebpf-subbuild/bpfel-unknown-none/release/oom-watcher-ebpf"),
     ];
 
     let mut found_path = None;
@@ -93,10 +101,10 @@ fn main() {
             println!("cargo:warning=  {}", path.display());
         }
 
-        // List contents of workspace target directory
-        let workspace_target = workspace_root.join("target/bpfel-unknown-none/release/");
-        println!("cargo:warning=Contents of {}:", workspace_target.display());
-        if let Ok(entries) = fs::read_dir(&workspace_target) {
+        // List contents of the eBPF build's target directory
+        let ebpf_release_dir = ebpf_target_dir.join("bpfel-unknown-none/release/");
+        println!("cargo:warning=Contents of {}:", ebpf_release_dir.display());
+        if let Ok(entries) = fs::read_dir(&ebpf_release_dir) {
             for entry in entries.flatten() {
                 println!("cargo:warning=  {}", entry.file_name().to_string_lossy());
             }
