@@ -33,6 +33,12 @@ fn main() {
 
     // Build the eBPF program
     let mut cmd = Command::new("cargo");
+    // Cargo sets these for build scripts to point at the outer build's own
+    // rustc/sysroot; inherited as-is they make this nested cargo's rustc
+    // load a mismatched librustc_driver ("undefined symbol" at `rustc -vV`).
+    cmd.env_remove("LD_LIBRARY_PATH")
+        .env_remove("RUSTC")
+        .env_remove("RUSTUP_TOOLCHAIN");
     cmd.arg("+nightly")
         .arg("build")
         .arg("--release")
