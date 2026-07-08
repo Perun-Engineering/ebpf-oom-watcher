@@ -1,3 +1,10 @@
+## [0.1.12](https://github.com/Perun-Engineering/ebpf-oom-watcher/compare/v0.1.11...v0.1.12) (2026-07-08)
+
+
+### Bug Fixes
+
+* **ci:** lowercase ghcr.io image name in per-arch digest push ([9912bca](https://github.com/Perun-Engineering/ebpf-oom-watcher/commit/9912bca42c32749b10d342d06c29002bc680e633))
+
 ## [0.1.11](https://github.com/Perun-Engineering/ebpf-oom-watcher/compare/v0.1.10...v0.1.11) (2026-07-08)
 
 
