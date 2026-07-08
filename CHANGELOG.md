@@ -1,3 +1,11 @@
+## [0.1.8](https://github.com/Perun-Engineering/ebpf-oom-watcher/compare/v0.1.7...v0.1.8) (2026-07-08)
+
+
+### Bug Fixes
+
+* **deps:** repair inconsistent Cargo.lock dependency tree ([258a6b6](https://github.com/Perun-Engineering/ebpf-oom-watcher/commit/258a6b6bb3cc50ec5b870f64fe803f7a3d5f346a))
+* **docker:** update nightly before adding rust-src in builder stage ([a5fd9b4](https://github.com/Perun-Engineering/ebpf-oom-watcher/commit/a5fd9b4bfddf8416a1051b196758a11fe4133f3d))
+
 ## [0.1.7](https://github.com/Perun-Engineering/ebpf-oom-watcher/compare/v0.1.6...v0.1.7) (2026-07-08)
 
 
