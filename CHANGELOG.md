@@ -1,3 +1,10 @@
+## [0.1.11](https://github.com/Perun-Engineering/ebpf-oom-watcher/compare/v0.1.10...v0.1.11) (2026-07-08)
+
+
+### Bug Fixes
+
+* **core:** strip leaked build-script env from nested eBPF cargo call ([72c7516](https://github.com/Perun-Engineering/ebpf-oom-watcher/commit/72c751669a58b03000c8eb3c43f8d758a2e2e337))
+
 ## [0.1.10](https://github.com/Perun-Engineering/ebpf-oom-watcher/compare/v0.1.9...v0.1.10) (2026-07-08)
 
 
