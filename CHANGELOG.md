@@ -1,3 +1,17 @@
+## [0.1.13](https://github.com/Perun-Engineering/ebpf-oom-watcher/compare/v0.1.12...v0.1.13) (2026-08-10)
+
+
+### Bug Fixes
+
+* bump anyhow from 1.0.103 to 1.0.104 ([6c429b7](https://github.com/Perun-Engineering/ebpf-oom-watcher/commit/6c429b7fbe8a1f3551d610bee048f1e751530a35))
+* bump bytes from 1.12.0 to 1.12.1 ([62bc0bf](https://github.com/Perun-Engineering/ebpf-oom-watcher/commit/62bc0bf5e41bee027c919472ad069cbff4c4e1d5))
+* bump kube from 4.0.0 to 4.2.0 ([57c53f4](https://github.com/Perun-Engineering/ebpf-oom-watcher/commit/57c53f40c7e774b5bf7c36a201ac2576cd5830c0))
+* bump libc from 0.2.186 to 0.2.189 ([44a1afb](https://github.com/Perun-Engineering/ebpf-oom-watcher/commit/44a1afbf8d1163eddf952c68a1b9a3dac74143f5))
+* bump regex from 1.12.4 to 1.13.1 ([193f595](https://github.com/Perun-Engineering/ebpf-oom-watcher/commit/193f5956d5c47287d7bf66e7caf85807e60e9b5c))
+* bump serde from 1.0.228 to 1.0.229 ([e657e97](https://github.com/Perun-Engineering/ebpf-oom-watcher/commit/e657e97a2b04b8bbac872b1ae95c9e1cd89d3d1f))
+* bump tokio from 1.52.3 to 1.53.1 ([166a402](https://github.com/Perun-Engineering/ebpf-oom-watcher/commit/166a4023393f277ae3ef2aea9ef9273b229f33a9))
+* bump which from 8.0.4 to 8.0.5 ([7f948b9](https://github.com/Perun-Engineering/ebpf-oom-watcher/commit/7f948b92426909ac760b46b8c3538101c0aeff53))
+
 ## [0.1.12](https://github.com/Perun-Engineering/ebpf-oom-watcher/compare/v0.1.11...v0.1.12) (2026-07-08)
 
 
