@@ -1,3 +1,5 @@
+## [0.1.16](https://github.com/Perun-Engineering/ebpf-oom-watcher/compare/v0.1.15...v0.1.16) (2026-08-23)
+
 ## [0.1.15](https://github.com/Perun-Engineering/ebpf-oom-watcher/compare/v0.1.14...v0.1.15) (2026-08-23)
 
 
