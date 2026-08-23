@@ -1,3 +1,10 @@
+## [0.1.14](https://github.com/Perun-Engineering/ebpf-oom-watcher/compare/v0.1.13...v0.1.14) (2026-08-23)
+
+
+### Bug Fixes
+
+* **ci:** pin bpf-linker to 0.10.4 ([#69](https://github.com/Perun-Engineering/ebpf-oom-watcher/issues/69)) ([4dc3832](https://github.com/Perun-Engineering/ebpf-oom-watcher/commit/4dc3832c2e3f09ba1e7ce4b05683ebd27f94e63f))
+
 ## [0.1.13](https://github.com/Perun-Engineering/ebpf-oom-watcher/compare/v0.1.12...v0.1.13) (2026-08-10)
 
 
