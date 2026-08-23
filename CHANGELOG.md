@@ -1,3 +1,10 @@
+# [0.3.0](https://github.com/Perun-Engineering/ebpf-oom-watcher/compare/v0.2.0...v0.3.0) (2026-08-23)
+
+
+### Features
+
+* **metrics:** label OOM series with container_id and image_id ([#76](https://github.com/Perun-Engineering/ebpf-oom-watcher/issues/76)) ([e0cd6fa](https://github.com/Perun-Engineering/ebpf-oom-watcher/commit/e0cd6fa757014e346a87c0bdec5b8328843b51f5)), closes [#73](https://github.com/Perun-Engineering/ebpf-oom-watcher/issues/73) [#72](https://github.com/Perun-Engineering/ebpf-oom-watcher/issues/72) [#73](https://github.com/Perun-Engineering/ebpf-oom-watcher/issues/73)
+
 # [0.2.0](https://github.com/Perun-Engineering/ebpf-oom-watcher/compare/v0.1.16...v0.2.0) (2026-08-23)
 
 
