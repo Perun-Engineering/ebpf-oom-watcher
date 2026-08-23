@@ -42,6 +42,11 @@ axum = "0.8"
 serde = { version = "1.0", features = ["derive"] }
 regex = "1.12"
 
+[dev-dependencies]
+# `test-util` only: the heartbeat tick is on a 30s period, so the watch-loop test covering
+# a node with no OOM events at all needs tokio's paused clock to auto-advance.
+tokio = { workspace = true, features = ["macros", "rt", "time", "test-util"] }
+
 [build-dependencies]
 # Build dependencies for compiling the eBPF program
 # The eBPF crate is built manually in build.rs, not as a dependency

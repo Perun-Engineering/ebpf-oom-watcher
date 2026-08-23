@@ -128,6 +128,25 @@ sum by (image_id) (increase(oom_kills_total{namespace="prod"}[24h]))
 oom_memory_usage_bytes{memory_type="anon_rss"}
 ```
 
+## HTTP endpoints
+
+Both served on `METRICS_PORT` (8080 by default).
+
+| Path | Used as | Answers |
+|---|---|---|
+| `/metrics` | scrape target, readiness probe | Prometheus text exposition. Being able to serve a scrape is exactly what readiness means here |
+| `/healthz` | liveness probe | `200` while the watch loop is still waking, `503` before it starts and once its heartbeat is 90s old |
+
+`/healthz` asks the watch loop, not the HTTP server. The loop stamps a heartbeat on every
+wakeup — each event, and a 30s ticker so a node with no OOM kills still reports — so a
+loop that stops being scheduled, or blocks inside resolution, fails the probe and the
+kubelet restarts the pod.
+
+It does **not** assert that OOM events are still being delivered, and deliberately does not
+claim to: the ticker fires whether or not the ring buffer is readable, an OOM cannot be
+synthesized on demand, and a ring buffer that genuinely fails ends the task — which already
+exits the process non-zero.
+
 ## Configuration
 
 ### Environment Variables

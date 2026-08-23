@@ -107,9 +107,11 @@ spec:
         - name: cgroup
           mountPath: /sys/fs/cgroup
           readOnly: true
+        # Liveness asks the watch loop, not axum: /healthz fails once the loop stops
+        # waking. Readiness stays on /metrics — serving a scrape is what ready means.
         livenessProbe:
           httpGet:
-            path: /metrics
+            path: /healthz
             port: 8080
           initialDelaySeconds: 30
           periodSeconds: 30

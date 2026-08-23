@@ -82,14 +82,20 @@ use these terms exactly.
   **OOM kill event** from an **OOM event source**, run **resolution** (recording the
   **resolution outcome**), **enrich**, then record the **enriched OOM event** to the
   **metrics recorder**. Generic over all three seams (source, resolver, recorder) plus an
-  injected clock (`now: impl Fn() -> u64`); static dispatch, no `dyn`. Loops until the
-  source ends — which a real source never does, so in production the loop runs forever and
-  `main`'s `tokio::select!` supervises and aborts it. A finite test source drives the whole
-  loop to completion, making the pipeline the test surface.
+  injected clock (`now: impl Fn() -> u64`) and an injected heartbeat
+  (`heartbeat: impl Fn(u64)`, see **liveness heartbeat**); static dispatch, no `dyn`. Loops
+  until the source ends — which a real source never does, so in production the loop runs
+  forever and `main`'s `tokio::select!` supervises and aborts it. A finite test source drives
+  the whole loop to completion, making the pipeline the test surface. Each iteration races
+  the source against the heartbeat ticker in a `select!`, which is why the source seam
+  requires `next` to be cancel-safe.
 
 - **OOM event source** (`OomEventSource`) — the seam for where **OOM kill events** reach
   userspace. A trait exposing `async next(&mut self) -> Option<OomKillEvent>`; `None` means
-  the stream has ended. It also exposes `dropped_total() -> Option<u64>`, defaulted to `None`
+  the stream has ended. `next` must be **cancel-safe**: the **watch loop** races it against
+  the heartbeat ticker, so the future is dropped whenever a tick wins. `RingBufSource`
+  satisfies this by holding its only await at the readiness edge and draining into a field,
+  never into a local. It also exposes `dropped_total() -> Option<u64>`, defaulted to `None`
   — see **dropped total**. `RingBufSource` is the in-cluster adapter — it owns the eBPF ring
   buffer, performs the single `unsafe` decode (`read_unaligned` + short-read guard), and
   hides the epoll wait (via `tokio::io::unix::AsyncFd`) so it only yields whole events.
@@ -125,6 +131,18 @@ use these terms exactly.
   actually hit the limit — a 64MB kill reading `anon_rss=0`. Each kind peaks independently,
   so one label set can pair one victim's `anon_rss` with another's `file_rss`. **Series
   eviction** is what bounds the window a peak spans.
+
+- **Liveness heartbeat** (`Health`) — what makes the liveness probe mean something. The
+  **watch loop** stamps a monotonic second-stamp on every wakeup, event or ticker, and
+  `/healthz` fails once that stamp is three tick intervals old. It exists because `/metrics`
+  used to be the liveness probe and answered 200 for as long as axum was up, including with
+  the loop wedged behind it. What it proves is bounded and stated in the module: the loop is
+  still being scheduled and is not blocked inside **resolution**. What it cannot prove is
+  that events are still being *delivered* — the ticker fires whether or not the ring buffer
+  is readable, an OOM cannot be synthesized, and a ring buffer that genuinely fails ends the
+  task, which `main`'s `select!` already turns into a non-zero exit. Deliberately axum-free
+  and injected into the loop as a closure, the way the clock is, so `watch` never learns an
+  HTTP surface exists.
 
 - **Series eviction** (`MetricsCollector::evict_stale`) — what bounds cardinality. The
   per-container metrics are keyed on pod name, so an OOM-looping pod mints a fresh label set

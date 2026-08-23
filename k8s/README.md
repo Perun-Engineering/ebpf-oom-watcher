@@ -18,6 +18,12 @@ The OOM Watcher exposes the following Prometheus metrics on port 8080:
 - `oom_memory_usage_bytes{node, namespace, pod, container, memory_type}` - Peak memory usage at OOM time, per memory type
 - `oom_last_timestamp{node, namespace, pod, container}` - Timestamp of last OOM event
 
+## Endpoints
+
+- `/metrics` — Prometheus scrape target, and the readiness probe.
+- `/healthz` — the liveness probe. Reports on the watch loop's heartbeat, not on the HTTP
+  server: `503` until the loop starts and once its heartbeat is 90s stale.
+
 ## Deployment
 
 ### Prerequisites
