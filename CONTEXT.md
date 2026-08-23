@@ -50,13 +50,18 @@ use these terms exactly.
   the container id, and it exists because the previous implementation listed every pod on the
   node on *every* OOM event — one API call per kill during a storm. It is deliberately the
   only pod source: there is no falling back to a live list on a miss, so "no API call per
-  event" holds by construction. Objects are pruned (`spec`, `managedFields`, annotations) on
-  the way in, leaving only what matching reads. Not on a seam of its own — it is internal to
-  `KubernetesClient`, the way **series eviction** is internal to the Prometheus adapter — but
-  it is unit-testable regardless, because a reflector `Writer` can be driven by hand.
+  event" holds by construction. Objects are pruned on the way in — `spec`, which nothing here
+  reads, plus `managedFields` and annotations, the two `ObjectMeta` fields kube documents as
+  safe to drop; `status` and the rest of `metadata` stay. Not behind a seam of its own — no
+  trait, no second adapter, it is a private detail of `KubernetesClient` the way **series
+  eviction** is private to the Prometheus adapter (its watch is still its own supervised
+  task) — but it is unit-testable regardless, because a reflector `Writer` can be driven by
+  hand.
   Readiness is re-read per lookup rather than latched at startup, so a cache that syncs late
-  starts serving; `main` supervises the task feeding it, since a cache nobody feeds goes
-  stale in silence.
+  starts serving; that read is also the *only* poll of the readiness latch, which is why the
+  sync is logged from the event stream (on `InitDone`) instead of from a second waiter —
+  `wait_until_ready` is a `oneshot` with one waker slot. `main` supervises the task feeding
+  the cache, since a cache nobody feeds goes stale in silence.
 
 - **Container resolver** (`ContainerResolver`) — the seam for **resolution**. A trait
   exposing `node_name()` and `async resolve(pid) -> ResolutionOutcome`. `KubernetesClient`

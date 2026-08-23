@@ -149,31 +149,33 @@ impl PodCache {
         let events = watcher(pods_api, config).modify(prune_for_cache);
 
         let cache = Self { store };
-        let logger = cache.store.clone();
+        let synced = cache.store.clone();
         let node = node_name.to_string();
 
-        let task = tokio::spawn(async move {
-            // Both halves run for the life of the process. The log side resolves once and
-            // the watch side never does, so the task ends only if the stream ends.
-            tokio::join!(
-                async move {
-                    match logger.wait_until_ready().await {
-                        Ok(()) => info!("Pod cache synced: {} pods on node {}", logger.len(), node),
-                        Err(e) => warn!("Pod cache never synced: {}", e),
-                    }
-                },
-                reflector(writer, events)
-                    // Retry list/watch failures forever rather than ending the stream: an
-                    // API server rollout must not permanently freeze the cache.
-                    .default_backoff()
-                    .for_each(|event| {
-                        if let Err(e) = event {
-                            warn!("Pod cache watch error (retrying): {}", e);
+        let task = tokio::spawn(
+            reflector(writer, events)
+                // Retry list/watch failures forever rather than ending the stream: an API
+                // server rollout must not permanently freeze the cache. `DefaultBackoff`
+                // builds its exponential `.without_max_times()`, so there is no give-up
+                // state to reach.
+                .default_backoff()
+                .for_each(move |event| {
+                    match event {
+                        // The reflector applies each event to the store *before* yielding
+                        // it, so this count is the synced one. Reporting from here rather
+                        // than from a `wait_until_ready()` waiter is deliberate twice over:
+                        // it also covers the relist after a desync, and it keeps
+                        // `ensure_synced` the only poller of the readiness latch — which
+                        // has a single waker slot to displace.
+                        Ok(watcher::Event::InitDone) => {
+                            info!("Pod cache synced: {} pods on node {}", synced.len(), node)
                         }
-                        std::future::ready(())
-                    }),
-            );
-        });
+                        Ok(_) => {}
+                        Err(e) => warn!("Pod cache watch error (retrying): {}", e),
+                    }
+                    std::future::ready(())
+                }),
+        );
 
         (cache, task)
     }
@@ -185,7 +187,7 @@ impl PodCache {
     /// of anything — reporting it as a miss would file an unreachable API server under the
     /// benign reap race that `oom_resolution_failures_total{reason}` exists to separate.
     fn identity_of(&self, container_id: &str) -> Result<Option<ContainerIdentity>> {
-        self.synced()?;
+        self.ensure_synced()?;
 
         let pods = self.store.state();
         let identity = identity_from_pods(pods.iter().map(|pod| pod.as_ref()), container_id);
@@ -195,13 +197,15 @@ impl PodCache {
         Ok(identity)
     }
 
-    /// Whether the initial list has landed, without waiting for it.
+    /// Fail unless the initial list has landed — without waiting for it.
     ///
     /// `wait_until_ready` latches when that list completes, so polling it once is a read
-    /// of that latch — and re-checking per lookup, rather than caching the answer at
-    /// startup, is what lets a cache that synced late start serving. Nothing else awaits
-    /// readiness concurrently, so this cannot steal another waiter's wakeup.
-    fn synced(&self) -> Result<()> {
+    /// of that latch, and re-reading it per lookup rather than latching the answer at
+    /// startup is what lets a cache that synced late start serving. This is deliberately
+    /// the only poller: the latch is a `oneshot` with one waker slot, so a second waiter
+    /// would have its wakeup dropped by this poll's noop waker. That is why the sync log
+    /// is driven off the event stream instead.
+    fn ensure_synced(&self) -> Result<()> {
         match self.store.wait_until_ready().now_or_never() {
             Some(Ok(())) => Ok(()),
             // The reflector task is gone, so the cache will never sync — fatal, and the
@@ -520,6 +524,11 @@ mod tests {
         (PodCache { store }, writer)
     }
 
+    /// The pod the cache tests resolve against: one container, carrying `ID`.
+    fn victim_pod() -> Pod {
+        pod_with(&format!("containerd://{ID}"), "repo@sha256:abc")
+    }
+
     /// Deliver an initial list, the way a freshly started watch does.
     fn sync(writer: &mut Writer<Pod>, pods: Vec<Pod>) {
         writer.apply_watcher_event(&watcher::Event::Init);
@@ -532,10 +541,7 @@ mod tests {
     #[test]
     fn resolves_a_container_from_the_cache() {
         let (cache, mut writer) = cache_and_writer();
-        sync(
-            &mut writer,
-            vec![pod_with(&format!("containerd://{ID}"), "repo@sha256:abc")],
-        );
+        sync(&mut writer, vec![victim_pod()]);
 
         let identity = cache
             .identity_of(ID)
@@ -578,10 +584,7 @@ mod tests {
         // yet the set of pods on this node.
         let (cache, mut writer) = cache_and_writer();
         writer.apply_watcher_event(&watcher::Event::Init);
-        writer.apply_watcher_event(&watcher::Event::InitApply(pod_with(
-            &format!("containerd://{ID}"),
-            "repo@sha256:abc",
-        )));
+        writer.apply_watcher_event(&watcher::Event::InitApply(victim_pod()));
 
         assert!(cache.identity_of(ID).is_err());
     }
@@ -595,10 +598,7 @@ mod tests {
 
         assert!(cache.identity_of(ID).is_err());
 
-        sync(
-            &mut writer,
-            vec![pod_with(&format!("containerd://{ID}"), "repo@sha256:abc")],
-        );
+        sync(&mut writer, vec![victim_pod()]);
 
         assert!(cache
             .identity_of(ID)
@@ -615,10 +615,7 @@ mod tests {
 
         assert_eq!(cache.identity_of(ID).expect("synced"), None);
 
-        writer.apply_watcher_event(&watcher::Event::Apply(pod_with(
-            &format!("containerd://{ID}"),
-            "repo@sha256:abc",
-        )));
+        writer.apply_watcher_event(&watcher::Event::Apply(victim_pod()));
 
         assert!(cache.identity_of(ID).expect("synced").is_some());
     }
@@ -626,7 +623,7 @@ mod tests {
     #[test]
     fn a_deleted_pod_stops_resolving() {
         let (cache, mut writer) = cache_and_writer();
-        let pod = pod_with(&format!("containerd://{ID}"), "repo@sha256:abc");
+        let pod = victim_pod();
         sync(&mut writer, vec![pod.clone()]);
 
         writer.apply_watcher_event(&watcher::Event::Delete(pod));
@@ -638,7 +635,7 @@ mod tests {
     fn pruning_keeps_everything_resolution_reads() {
         // Guards the memory trim: whatever `prune_for_cache` drops, a pruned pod must
         // still resolve to the same identity a full one does.
-        let mut pod = pod_with(&format!("containerd://{ID}"), "repo@sha256:abc");
+        let mut pod = victim_pod();
         pod.spec = Some(PodSpec {
             node_name: Some("node-1".to_string()),
             ..Default::default()
