@@ -97,6 +97,18 @@ The container runs with:
 - `priorityClassName: system-node-critical` and a blanket `operator: Exists`
   toleration, so a tainted node pool still gets the DaemonSet.
 
+Check `allocatable.pods` before installing cluster-wide, not just CPU and memory. A node at
+its pod cap has no room whatever its CPU and memory look like, and at `system-node-critical`
+the scheduler makes room by evicting a lower-priority pod — which on EKS, where the cap is
+an ENI limit and can be as low as 8, is easy to hit on a node that looks empty:
+
+```bash
+kubectl get nodes -o custom-columns=NAME:.metadata.name,PODS:.status.allocatable.pods
+```
+
+Remove `priorityClassName` from the manifest if that trade is not wanted; the DaemonSet then
+stays Pending on a full node instead of displacing anything.
+
 If a cluster defaults seccomp to `RuntimeDefault`, `bpf()` and `perf_event_open()`
 are blocked and the probe fails to load with a loud startup error. Set
 `securityContext.privileged=true` (chart) to fall back.
