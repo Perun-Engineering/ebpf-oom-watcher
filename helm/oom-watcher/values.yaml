@@ -40,12 +40,20 @@ securityContext:
       - PERFMON
       - SYS_RESOURCE
 
+# Measured, not guessed: 23Mi RSS with 27 pods cached on an arm64 Bottlerocket node
+# (0.4.0, 2026-08-23). The pod cache is the term that scales with node density, and one
+# measurement cannot separate its slope from the fixed cost, so the 64Mi request keeps
+# ~2.8x headroom over the one node actually observed rather than being cut to fit it.
+#
+# No CPU limit: the steady state is blocked on epoll, and the one moment CPU is needed is
+# an OOM storm — throttling there would delay a `/proc/<pid>/cgroup` read that is already
+# racing the reaper. The memory limit stays: OOM-killing the watcher loses events silently,
+# so it is a backstop against a leak, not a fitted bound.
 resources:
   limits:
-    cpu: 200m
     memory: 256Mi
   requests:
-    cpu: 100m
+    cpu: 50m
     memory: 64Mi
 
 nodeSelector: {}
