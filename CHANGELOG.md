@@ -1,3 +1,10 @@
+# [0.2.0](https://github.com/Perun-Engineering/ebpf-oom-watcher/compare/v0.1.16...v0.2.0) (2026-08-23)
+
+
+### Features
+
+* **metrics:** evict stale per-container series to bound cardinality ([#75](https://github.com/Perun-Engineering/ebpf-oom-watcher/issues/75)) ([8f8af93](https://github.com/Perun-Engineering/ebpf-oom-watcher/commit/8f8af9353e58867401d9510b2666fadd6d199d44)), closes [#71](https://github.com/Perun-Engineering/ebpf-oom-watcher/issues/71)
+
 ## [0.1.16](https://github.com/Perun-Engineering/ebpf-oom-watcher/compare/v0.1.15...v0.1.16) (2026-08-23)
 
 ## [0.1.15](https://github.com/Perun-Engineering/ebpf-oom-watcher/compare/v0.1.14...v0.1.15) (2026-08-23)
