@@ -55,6 +55,12 @@ affinity: {}
 env:
   metricsPort: 8080
   logLevel: info
+  # Per-container series (oom_kills_total and friends) are keyed on pod name, so an
+  # OOM-looping pod mints a new one on every restart. A series with no OOM event for
+  # seriesTtlSeconds is deleted. Keep this well above serviceMonitor.interval below —
+  # a series deleted before it is scraped takes its increments with it.
+  seriesTtlSeconds: 1800
+  seriesSweepIntervalSeconds: 300
 
 service:
   type: ClusterIP

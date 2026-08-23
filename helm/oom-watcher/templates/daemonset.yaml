@@ -46,6 +46,10 @@ spec:
               value: {{ .Values.env.metricsPort | quote }}
             - name: RUST_LOG
               value: {{ .Values.env.logLevel }}
+            - name: SERIES_TTL_SECONDS
+              value: {{ .Values.env.seriesTtlSeconds | quote }}
+            - name: SERIES_SWEEP_INTERVAL_SECONDS
+              value: {{ .Values.env.seriesSweepIntervalSeconds | quote }}
           ports:
             - containerPort: {{ .Values.env.metricsPort }}
               name: metrics
