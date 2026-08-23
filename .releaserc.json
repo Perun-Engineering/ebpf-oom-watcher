@@ -23,9 +23,15 @@
       }
     ],
     [
+      "@semantic-release/exec",
+      {
+        "prepareCmd": "sed -i.bak -e 's/^version:.*/version: ${nextRelease.version}/' -e 's/^appVersion:.*/appVersion: \"${nextRelease.version}\"/' helm/oom-watcher/Chart.yaml && rm -f helm/oom-watcher/Chart.yaml.bak"
+      }
+    ],
+    [
       "@semantic-release/git",
       {
-        "assets": ["CHANGELOG.md"],
+        "assets": ["CHANGELOG.md", "helm/oom-watcher/Chart.yaml"],
         "message": "chore(release): ${nextRelease.version} [skip ci]\n\n${nextRelease.notes}"
       }
     ],
