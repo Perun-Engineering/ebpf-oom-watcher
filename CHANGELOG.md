@@ -1,3 +1,10 @@
+## [0.1.15](https://github.com/Perun-Engineering/ebpf-oom-watcher/compare/v0.1.14...v0.1.15) (2026-08-23)
+
+
+### Bug Fixes
+
+* make the probe correct on real kernels and the deploy paths pullable ([#68](https://github.com/Perun-Engineering/ebpf-oom-watcher/issues/68)) ([e859210](https://github.com/Perun-Engineering/ebpf-oom-watcher/commit/e8592107e9283911fb634d28dcd6018f0dd6babe))
+
 ## [0.1.14](https://github.com/Perun-Engineering/ebpf-oom-watcher/compare/v0.1.13...v0.1.14) (2026-08-23)
 
 
