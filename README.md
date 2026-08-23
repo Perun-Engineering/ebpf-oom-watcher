@@ -243,6 +243,7 @@ flowchart LR
 |---|---|---|
 | `oom:mark_victim` extended fields | **6.9** | Before 6.9 the tracepoint carries only `pid`. The memory figures do not exist |
 | BPF ring buffer (`BPF_MAP_TYPE_RINGBUF`) | 5.8 | How events reach userland |
+| `CAP_BPF` / `CAP_PERFMON` | 5.8 | The pod runs unprivileged; before 5.8 these are folded into `CAP_SYS_ADMIN` |
 
 The 6.9 requirement is enforced, not advisory: on an older kernel the tracepoint still
 exists and still attaches, so the probe would report correct PIDs beside meaningless memory

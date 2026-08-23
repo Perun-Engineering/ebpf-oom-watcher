@@ -24,13 +24,21 @@ podSecurityContext:
   runAsUser: 0
   runAsGroup: 0
 
+# privileged is not needed: it implied the capability list below rather than adding to
+# it, and on kernel >= 5.8 three capabilities cover everything the probe does. CAP_BPF
+# loads the program and creates the maps, CAP_PERFMON attaches it to the tracepoint
+# (perf_event_open), and CAP_SYS_RESOURCE covers the ring buffer against RLIMIT_MEMLOCK
+# on kernels that still charge BPF memory to it.
 securityContext:
-  privileged: true
+  privileged: false
+  allowPrivilegeEscalation: false
   capabilities:
+    drop:
+      - ALL
     add:
-      - SYS_ADMIN
+      - BPF
+      - PERFMON
       - SYS_RESOURCE
-      - SYS_PTRACE
 
 resources:
   limits:
@@ -42,13 +50,10 @@ resources:
 
 nodeSelector: {}
 
+# A node-level DaemonSet belongs on every node, tainted pools included. Tolerating only
+# the control-plane taints makes a tainted node report DESIRED=0 with no error at all.
 tolerations:
-  - key: node-role.kubernetes.io/control-plane
-    operator: Exists
-    effect: NoSchedule
-  - key: node-role.kubernetes.io/master
-    operator: Exists
-    effect: NoSchedule
+  - operator: Exists
 
 affinity: {}
 
@@ -77,6 +82,11 @@ serviceMonitor:
   labels: {}
   annotations: {}
 
+# The watcher only talks to the API server, which Config::incluster() reaches by IP, so
+# host networking buys nothing and claims port 8080 on every node. When it is enabled the
+# template also sets dnsPolicy: ClusterFirstWithHostNet so cluster DNS keeps resolving.
+hostNetwork: false
+
 hostPaths:
   proc: /proc
   sys: /sys
@@ -88,6 +98,7 @@ updateStrategy:
   rollingUpdate:
     maxUnavailable: 1
 
-priorityClassName: ""
+# A node-level DaemonSet should outrank ordinary workloads for scheduling and eviction.
+priorityClassName: system-node-critical
 
 terminationGracePeriodSeconds: 30
