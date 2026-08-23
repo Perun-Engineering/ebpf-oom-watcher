@@ -61,7 +61,7 @@ spec:
         effect: NoSchedule
       containers:
       - name: oom-watcher
-        image: oom-watcher:latest
+        image: ghcr.io/perun-engineering/ebpf-oom-watcher:latest
         imagePullPolicy: Always
         securityContext:
           privileged: true
