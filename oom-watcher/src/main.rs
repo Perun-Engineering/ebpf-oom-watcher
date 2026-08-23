@@ -33,6 +33,12 @@ const DEFAULT_SERIES_TTL_SECONDS: u64 = 1800;
 /// is why the sweep is far cheaper than the TTL is long.
 const DEFAULT_SERIES_SWEEP_INTERVAL_SECONDS: u64 = 300;
 
+/// How long the watch loop waits for the pod cache's first list before draining events
+/// anyway. It bounds how long a kill sits in the ring buffer at startup, not how long the
+/// process takes to serve `/metrics`. Ten seconds is generous for one node-scoped list and
+/// well inside the ring's ~3k-event headroom.
+const CACHE_SYNC_TIMEOUT: Duration = Duration::from_secs(10);
+
 #[tokio::main]
 async fn main() -> anyhow::Result<()> {
     env_logger::init();
@@ -41,20 +47,26 @@ async fn main() -> anyhow::Result<()> {
 
     // Resolver for the watch loop: Some iff in-cluster. A failure drops us to standalone
     // mode (no node, no container identity) rather than aborting startup.
-    let k8s_client = match KubernetesClient::new().await {
-        Ok(client) => {
+    //
+    // The client comes with the task feeding its pod cache. That task is what keeps
+    // resolution off the API server, so it is supervised like every other worker below —
+    // a cache nobody is feeding still answers, just with stale pods.
+    let (k8s_client, mut pod_cache) = match KubernetesClient::new().await {
+        Ok((client, cache_task)) => {
             info!(
                 "Successfully connected to Kubernetes API on node: {}",
                 client.node_name()
             );
-            Some(client)
+            (Some(client), Some(cache_task))
         }
         Err(e) => {
             warn!(
                 "Failed to connect to Kubernetes API: {}. Running in standalone mode.",
                 e
             );
-            None
+            // Standalone mode has no pods to mirror, so there is no cache task and nothing
+            // to supervise. Both are `None` together — the client is what owns the cache.
+            (None, None)
         }
     };
 
@@ -97,6 +109,16 @@ async fn main() -> anyhow::Result<()> {
     // the task. It loops forever in production; the select! below supervises and aborts it.
     let recorder = metrics_collector.clone();
     let mut event_processor = task::spawn(async move {
+        // Let the pod cache list before we start resolving against it. The probe is
+        // already attached, so a kill during this window is held in the ring buffer and
+        // resolves correctly once the list lands — where draining immediately would
+        // report it against an empty cache. Waiting here rather than during startup is
+        // what keeps it off the critical path: `/metrics` is bound above (and doubles as
+        // the liveness probe), and this runs inside the supervised task, so a SIGTERM
+        // arriving mid-wait is still handled.
+        if let Some(client) = &k8s_client {
+            client.wait_until_synced(CACHE_SYNC_TIMEOUT).await;
+        }
         watch::run(source, k8s_client, recorder.as_ref(), wall_clock_secs).await;
     });
 
@@ -129,6 +151,9 @@ async fn main() -> anyhow::Result<()> {
     // Run until shutdown is requested or a worker task exits unexpectedly. If a worker
     // dies, return an error so the process exits non-zero and the DaemonSet restarts the
     // pod, rather than staying up but no longer watching.
+    //
+    // Read once, before the pod cache arm borrows the handle it guards.
+    let watching_pods = pod_cache.is_some();
     let outcome: anyhow::Result<()> = tokio::select! {
         res = shutdown_signal() => {
             res?;
@@ -147,11 +172,21 @@ async fn main() -> anyhow::Result<()> {
             error!("Series sweeper task exited unexpectedly: {:?}", res);
             Err(anyhow!("series sweeper task exited"))
         }
+        // Disabled in standalone mode, where there is no cache task to wait on. The
+        // `expect` is unreachable for that reason, and it only runs if the arm is polled.
+        res = async { pod_cache.as_mut().expect("enabled only when the cache exists").await },
+              if watching_pods => {
+            error!("Pod cache task exited unexpectedly: {:?}", res);
+            Err(anyhow!("pod cache task exited"))
+        }
     };
 
     event_processor.abort();
     metrics_server.abort();
     series_sweeper.abort();
+    if let Some(pod_cache) = &pod_cache {
+        pod_cache.abort();
+    }
 
     outcome
 }

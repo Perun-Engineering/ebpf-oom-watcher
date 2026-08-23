@@ -13,6 +13,9 @@ ebpf = ["dep:aya", "dep:libc"]
 
 [dependencies]
 bytes = "1.11"
+# StreamExt (driving the pod-cache reflector) and FutureExt::now_or_never (reading its
+# readiness latch without awaiting it). Already in the tree via kube-runtime.
+futures = "0.3"
 oom-watcher-common = { path = "../oom-watcher-common", features = ["user"] }
 
 anyhow = { workspace = true, default-features = true }
@@ -30,7 +33,7 @@ tokio = { workspace = true, features = [
 ] }
 
 # Kubernetes and Prometheus dependencies
-kube = { version = "4.0", features = ["client", "config", "derive"] }
+kube = { version = "4.0", features = ["client", "config", "derive", "runtime"] }
 k8s-openapi = { version = "0.28", features = ["v1_32"] }
 # default-features disabled to drop the unmaintained protobuf 2.x encoder
 # (RUSTSEC-2024-0437); only the text exposition format (TextEncoder) is used.
