@@ -33,6 +33,12 @@ const DEFAULT_SERIES_TTL_SECONDS: u64 = 1800;
 /// is why the sweep is far cheaper than the TTL is long.
 const DEFAULT_SERIES_SWEEP_INTERVAL_SECONDS: u64 = 300;
 
+/// How long the watch loop waits for the pod cache's first list before draining events
+/// anyway. It bounds how long a kill sits in the ring buffer at startup, not how long the
+/// process takes to serve `/metrics`. Ten seconds is generous for one node-scoped list and
+/// well inside the ring's ~3k-event headroom.
+const CACHE_SYNC_TIMEOUT: Duration = Duration::from_secs(10);
+
 #[tokio::main]
 async fn main() -> anyhow::Result<()> {
     env_logger::init();
@@ -103,6 +109,16 @@ async fn main() -> anyhow::Result<()> {
     // the task. It loops forever in production; the select! below supervises and aborts it.
     let recorder = metrics_collector.clone();
     let mut event_processor = task::spawn(async move {
+        // Let the pod cache list before we start resolving against it. The probe is
+        // already attached, so a kill during this window is held in the ring buffer and
+        // resolves correctly once the list lands — where draining immediately would
+        // report it against an empty cache. Waiting here rather than during startup is
+        // what keeps it off the critical path: `/metrics` is bound above (and doubles as
+        // the liveness probe), and this runs inside the supervised task, so a SIGTERM
+        // arriving mid-wait is still handled.
+        if let Some(client) = &k8s_client {
+            client.wait_until_synced(CACHE_SYNC_TIMEOUT).await;
+        }
         watch::run(source, k8s_client, recorder.as_ref(), wall_clock_secs).await;
     });
 

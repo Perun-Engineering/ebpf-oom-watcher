@@ -1,4 +1,4 @@
-use std::{fs, io, sync::LazyLock};
+use std::{fs, io, sync::LazyLock, time::Duration};
 
 use anyhow::{anyhow, Context, Result};
 use futures::{FutureExt, StreamExt};
@@ -197,14 +197,38 @@ impl PodCache {
         Ok(identity)
     }
 
+    /// Wait for the initial list, giving up after `timeout`.
+    ///
+    /// Called once before the watch loop starts draining events, so an OOM in the first
+    /// moments after a restart resolves instead of reporting an unsynced cache. Giving up
+    /// is not fatal — the watch keeps retrying and [`ensure_synced`](Self::ensure_synced)
+    /// keeps reporting the truth — so this can only delay the start of watching, never
+    /// prevent it.
+    async fn wait_until_synced(&self, timeout: Duration) {
+        match tokio::time::timeout(timeout, self.store.wait_until_ready()).await {
+            // The count is logged by the stream on `InitDone`; saying it twice adds nothing.
+            Ok(Ok(())) => {}
+            Ok(Err(e)) => warn!("Pod cache will never sync: {}", e),
+            Err(_) => warn!(
+                "Pod cache still syncing after {}s; watching anyway — until it lands, events \
+                 report an unresolved container rather than a wrong one",
+                timeout.as_secs()
+            ),
+        }
+    }
+
     /// Fail unless the initial list has landed — without waiting for it.
     ///
     /// `wait_until_ready` latches when that list completes, so polling it once is a read
     /// of that latch, and re-reading it per lookup rather than latching the answer at
-    /// startup is what lets a cache that synced late start serving. This is deliberately
-    /// the only poller: the latch is a `oneshot` with one waker slot, so a second waiter
-    /// would have its wakeup dropped by this poll's noop waker. That is why the sync log
-    /// is driven off the event stream instead.
+    /// startup is what lets a cache that synced late start serving.
+    ///
+    /// This poll and [`wait_until_synced`](Self::wait_until_synced) are the only two users
+    /// of the latch, and they never overlap: the wait finishes before the watch loop
+    /// resolves its first event. That separation is load-bearing — the latch is a `oneshot`
+    /// with a single waker slot, so a concurrent waiter would have its wakeup dropped by
+    /// this poll's noop waker. It is also why the sync count is logged from the event
+    /// stream rather than from a waiter.
     fn ensure_synced(&self) -> Result<()> {
         match self.store.wait_until_ready().now_or_never() {
             Some(Ok(())) => Ok(()),
@@ -247,6 +271,16 @@ impl KubernetesClient {
         let (pods, cache_task) = PodCache::spawn(pods_api, &node_name);
 
         Ok((Self { pods, node_name }, cache_task))
+    }
+
+    /// Wait for the pod cache's initial list, giving up after `timeout`.
+    ///
+    /// The caller does this before draining OOM events, not during startup: the probe is
+    /// already attached by then, so events that land in the meantime wait in the ring
+    /// buffer and resolve correctly, instead of being reported against a cache that has
+    /// nothing in it yet.
+    pub async fn wait_until_synced(&self, timeout: Duration) {
+        self.pods.wait_until_synced(timeout).await;
     }
 
     pub fn get_container_info(&self, pid: u32) -> Result<Option<ContainerIdentity>> {
@@ -629,6 +663,54 @@ mod tests {
         writer.apply_watcher_event(&watcher::Event::Delete(pod));
 
         assert_eq!(cache.identity_of(ID).expect("synced"), None);
+    }
+
+    #[tokio::test]
+    async fn waiting_returns_at_once_when_the_cache_is_already_synced() {
+        let (cache, mut writer) = cache_and_writer();
+        sync(&mut writer, vec![victim_pod()]);
+
+        // A generous timeout that must not be spent: nothing is pending.
+        cache.wait_until_synced(Duration::from_secs(30)).await;
+
+        assert!(cache.identity_of(ID).expect("synced").is_some());
+    }
+
+    #[tokio::test]
+    async fn waiting_returns_only_after_the_list_lands() {
+        // The property the startup wait exists for, and the one the two tests either side
+        // of this cannot see: both would pass if the wait returned immediately.
+        let (cache, mut writer) = cache_and_writer();
+        let listed = std::sync::atomic::AtomicBool::new(false);
+
+        tokio::join!(
+            async {
+                cache.wait_until_synced(Duration::from_secs(30)).await;
+                assert!(
+                    listed.load(std::sync::atomic::Ordering::SeqCst),
+                    "the wait returned before the initial list landed"
+                );
+            },
+            async {
+                // Let the waiter park on the latch before anything is written to it.
+                tokio::task::yield_now().await;
+                sync(&mut writer, vec![victim_pod()]);
+                listed.store(true, std::sync::atomic::Ordering::SeqCst);
+            },
+        );
+
+        assert!(cache.identity_of(ID).expect("synced").is_some());
+    }
+
+    #[tokio::test]
+    async fn waiting_gives_up_rather_than_blocking_the_watch_loop_forever() {
+        // A cache that never syncs must not stop us watching: the events would be reported
+        // with no identity, which is worse than reporting them with a stale-cache error.
+        let (cache, _writer) = cache_and_writer();
+
+        cache.wait_until_synced(Duration::from_millis(1)).await;
+
+        assert!(cache.identity_of(ID).is_err());
     }
 
     #[test]

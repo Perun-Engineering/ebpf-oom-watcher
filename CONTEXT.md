@@ -58,10 +58,13 @@ use these terms exactly.
   task) — but it is unit-testable regardless, because a reflector `Writer` can be driven by
   hand.
   Readiness is re-read per lookup rather than latched at startup, so a cache that syncs late
-  starts serving; that read is also the *only* poll of the readiness latch, which is why the
-  sync is logged from the event stream (on `InitDone`) instead of from a second waiter —
-  `wait_until_ready` is a `oneshot` with one waker slot. `main` supervises the task feeding
-  the cache, since a cache nobody feeds goes stale in silence.
+  starts serving. The **watch loop** waits (bounded) for the first list before draining its
+  first event, so a kill during startup sits in the ring buffer and resolves properly rather
+  than being reported against an empty cache; that wait and the per-lookup read are the only
+  two users of the readiness latch and never overlap, which is why the sync is logged from
+  the event stream (on `InitDone`) rather than from a third waiter — `wait_until_ready` is a
+  `oneshot` with one waker slot. `main` supervises the task feeding the cache, since a cache
+  nobody feeds goes stale in silence.
 
 - **Container resolver** (`ContainerResolver`) — the seam for **resolution**. A trait
   exposing `node_name()` and `async resolve(pid) -> ResolutionOutcome`. `KubernetesClient`

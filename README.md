@@ -246,11 +246,12 @@ Check a node before deploying to it:
    `./scripts/preflight-node.sh` on the node to confirm
 3. **Every event lands on `namespace="unknown"`**: check `oom_resolution_failures_total`.
    `reason="error"` means the cgroup read itself failed — usually a missing `hostPID: true`
-   or a `/proc` that is not the host's — or that the pod cache has not finished its initial
-   list, which the logs will say (`Pod cache synced: N pods on node …` is the line that
-   should appear seconds after startup; `Pod cache watch error` is the one to look for if it
-   does not). `reason="not_found"` means the process was already reaped, which is the race
-   the probe cannot fully win
+   or a `/proc` that is not the host's — or that the pod cache still has not listed. The
+   watcher waits up to 10s for that list before processing its first event, so the second
+   case means the API server was unreachable for longer than that; the logs say which
+   (`Pod cache synced: N pods on node …` should appear seconds after startup, and
+   `Pod cache watch error` is what to look for if it does not). `reason="not_found"` means
+   the process was already reaped, which is the race the probe cannot fully win
 4. **`oom_events_dropped_total` is climbing**: the ring buffer overflowed. Raise
    `EVENTS`'s size in `oom-watcher-ebpf/src/main.rs` (must stay a power-of-2 multiple of
    `PAGE_SIZE`)
