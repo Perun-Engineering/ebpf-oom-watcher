@@ -118,6 +118,14 @@ use these terms exactly.
   only — HTTP serving lives in the `http` module so axum no longer leaks through its
   interface); a test spy is the second adapter.
 
+- **Peak memory gauge** (`oom_memory_usage_bytes`) — the largest figure seen for each
+  `memory_type`, not the latest. One memcg OOM kills several processes in a container and
+  they all write this label set, which carries no `container_id` to tell them apart, so
+  keeping the last write meant the container's init routinely overwrote the process that
+  actually hit the limit — a 64MB kill reading `anon_rss=0`. Each kind peaks independently,
+  so one label set can pair one victim's `anon_rss` with another's `file_rss`. **Series
+  eviction** is what bounds the window a peak spans.
+
 - **Series eviction** (`MetricsCollector::evict_stale`) — what bounds cardinality. The
   per-container metrics are keyed on pod name, so an OOM-looping pod mints a fresh label set
   on every restart and a Prometheus registry never expires one. The adapter therefore keeps

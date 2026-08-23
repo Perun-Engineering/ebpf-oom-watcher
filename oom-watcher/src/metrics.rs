@@ -160,7 +160,7 @@ impl MetricsCollector {
         let oom_memory_usage_bytes = GaugeVec::new(
             prometheus::Opts::new(
                 "oom_memory_usage_bytes",
-                "Memory usage in bytes at the time of OOM kill",
+                "Peak memory usage in bytes observed at OOM kill, per memory type",
             ),
             &["node", "namespace", "pod", "container", "memory_type"],
         )
@@ -294,6 +294,9 @@ impl MetricsCollector {
     /// series and the earliest key going stale must not delete it out from under a live
     /// one. It goes when the last key naming that container does.
     ///
+    /// Removing it is also what bounds the peak it holds: each series is the maximum
+    /// since it was created, so deleting it is what lets the next kill start from zero.
+    ///
     /// `remove_label_values` errors when the series is absent, which is not a failure
     /// here — it means there was nothing left to delete.
     fn remove_series(&self, key: &SeriesKey, memory_series_orphaned: bool) {
@@ -346,13 +349,36 @@ impl MetricsRecorder for MetricsCollector {
             .inc();
 
         // Kernel figures are kilobytes; the gauge is bytes.
+        //
+        // The peak, not the latest. A memcg OOM can kill several processes in one
+        // container, and this label set carries no `container_id` to tell them apart, so
+        // a plain `set` lets whichever was reaped last win — routinely the container's
+        // init, whose `anon_rss=0` then overwrites the process that actually hit the
+        // limit. Each `memory_type` peaks independently, so one label set can pair one
+        // victim's `anon_rss` with another's `file_rss`: the series answer "how large did
+        // this kind get", not "what did one process look like".
+        //
+        // The window the peak spans is the series' own lifetime. `evict_stale` deletes
+        // the series once the container stops being killed, and the next kill starts a
+        // fresh maximum from zero.
+        //
+        // The read-modify-write is safe unsynchronised because this is the only writer:
+        // `record_oom_event` is called from the single watch loop task.
         for (memory_type, kilobytes) in MEMORY_TYPES
             .into_iter()
             .zip(memory_values(&event.raw_event))
         {
-            self.oom_memory_usage_bytes
-                .with_label_values(&[node, namespace, pod, container, memory_type])
-                .set((kilobytes * 1024) as f64);
+            let gauge = self.oom_memory_usage_bytes.with_label_values(&[
+                node,
+                namespace,
+                pod,
+                container,
+                memory_type,
+            ]);
+            let bytes = (kilobytes * 1024) as f64;
+            if bytes > gauge.get() {
+                gauge.set(bytes);
+            }
         }
 
         self.oom_last_timestamp
@@ -737,5 +763,99 @@ mod tests {
         assert!(!collector
             .get_metrics()
             .contains("oom_events_dropped_total{"));
+    }
+
+    /// As [`event_at`], but with the four kernel memory figures in kilobytes, ordered to
+    /// match [`MEMORY_TYPES`] so a test reads in the same order the gauges do.
+    fn event_using(
+        pod: &str,
+        timestamp: u64,
+        kilobytes: [u64; MEMORY_TYPES.len()],
+    ) -> EnrichedOomEvent {
+        let mut event = event_at(pod, timestamp);
+        let [total_vm, anon_rss, file_rss, shmem_rss] = kilobytes;
+        event.raw_event.total_vm = total_vm;
+        event.raw_event.anon_rss = anon_rss;
+        event.raw_event.file_rss = file_rss;
+        event.raw_event.shmem_rss = shmem_rss;
+        event
+    }
+
+    /// The bytes the registry currently renders for one `memory_type` of the shared gauge,
+    /// so assertions compare numbers rather than formatted text. Panics if the series is
+    /// absent — its absence is asserted with `contains` where that is the point.
+    fn memory_gauge(collector: &MetricsCollector, memory_type: &str) -> f64 {
+        let prefix = format!(
+            concat!(
+                r#"oom_memory_usage_bytes{{container="api",memory_type="{}","#,
+                r#"namespace="prod",node="node-1",pod="api-7d9"}} "#
+            ),
+            memory_type
+        );
+        collector
+            .get_metrics()
+            .lines()
+            .find_map(|line| line.strip_prefix(&prefix))
+            .unwrap_or_else(|| panic!("no {memory_type} series"))
+            .trim()
+            .parse()
+            .expect("gauge value is a number")
+    }
+
+    const KIB: f64 = 1024.0;
+
+    #[test]
+    fn a_smaller_later_kill_does_not_overwrite_the_peak() {
+        // The cascading-kill case this metric got wrong: one memcg OOM kills the process
+        // that hit the limit and then the container's init, and both land on this label
+        // set because it carries no `container_id`. Under `set`, init's `anon_rss=0` won
+        // and an alert read 0 bytes for a 64MB OOM.
+        let collector = MetricsCollector::new();
+
+        collector.record_oom_event(&event_using("api-7d9", T0, [70_000, 64_260, 0, 0]));
+        collector.record_oom_event(&event_using("api-7d9", T0 + 1, [4_000, 0, 828, 0]));
+
+        assert_eq!(memory_gauge(&collector, "anon_rss"), 64_260.0 * KIB);
+        assert_eq!(memory_gauge(&collector, "total_vm"), 70_000.0 * KIB);
+    }
+
+    #[test]
+    fn a_larger_later_kill_raises_the_peak() {
+        // The same rule in the other order — the peak must still track upwards, or it
+        // would only ever report whichever kill happened to arrive first.
+        let collector = MetricsCollector::new();
+
+        collector.record_oom_event(&event_using("api-7d9", T0, [4_000, 0, 828, 0]));
+        collector.record_oom_event(&event_using("api-7d9", T0 + 1, [70_000, 64_260, 0, 0]));
+
+        assert_eq!(memory_gauge(&collector, "anon_rss"), 64_260.0 * KIB);
+    }
+
+    #[test]
+    fn each_memory_type_peaks_independently() {
+        // The consequence of taking the maximum per type: one label set can hold one
+        // victim's `anon_rss` beside another's `file_rss`. Each series answers "how large
+        // did this kind get", not "what did one process look like".
+        let collector = MetricsCollector::new();
+
+        collector.record_oom_event(&event_using("api-7d9", T0, [0, 64_260, 0, 0]));
+        collector.record_oom_event(&event_using("api-7d9", T0 + 1, [0, 0, 828, 0]));
+
+        assert_eq!(memory_gauge(&collector, "anon_rss"), 64_260.0 * KIB);
+        assert_eq!(memory_gauge(&collector, "file_rss"), 828.0 * KIB);
+    }
+
+    #[test]
+    fn eviction_resets_the_peak() {
+        // The peak spans the series' lifetime, and eviction is what ends it. Without the
+        // reset the maximum would be the process' high-water mark for as long as it runs,
+        // and a container whose kills got smaller would never say so.
+        let collector = MetricsCollector::new();
+        collector.record_oom_event(&event_using("api-7d9", T0, [70_000, 64_260, 0, 0]));
+
+        collector.evict_stale(T0 + TTL, TTL);
+        collector.record_oom_event(&event_using("api-7d9", T0 + TTL, [4_000, 1_024, 0, 0]));
+
+        assert_eq!(memory_gauge(&collector, "anon_rss"), 1_024.0 * KIB);
     }
 }
