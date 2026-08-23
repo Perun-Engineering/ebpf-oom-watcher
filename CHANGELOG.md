@@ -1,3 +1,10 @@
+# [0.7.0](https://github.com/Perun-Engineering/ebpf-oom-watcher/compare/v0.6.1...v0.7.0) (2026-08-23)
+
+
+### Features
+
+* **metrics:** make eviction and resolution follow pod lifecycle ([#83](https://github.com/Perun-Engineering/ebpf-oom-watcher/issues/83)) ([abe1c6f](https://github.com/Perun-Engineering/ebpf-oom-watcher/commit/abe1c6f681dc89cef5f646498d8d6d4e49bd99a0))
+
 ## [0.6.1](https://github.com/Perun-Engineering/ebpf-oom-watcher/compare/v0.6.0...v0.6.1) (2026-08-23)
 
 
