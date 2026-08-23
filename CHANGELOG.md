@@ -1,3 +1,10 @@
+## [0.6.1](https://github.com/Perun-Engineering/ebpf-oom-watcher/compare/v0.6.0...v0.6.1) (2026-08-23)
+
+
+### Bug Fixes
+
+* **helm:** set the DaemonSet resource defaults from a measurement ([#81](https://github.com/Perun-Engineering/ebpf-oom-watcher/issues/81)) ([ab00e93](https://github.com/Perun-Engineering/ebpf-oom-watcher/commit/ab00e93227f0a69fa407c5055707faff066f0ac7))
+
 # [0.6.0](https://github.com/Perun-Engineering/ebpf-oom-watcher/compare/v0.5.0...v0.6.0) (2026-08-23)
 
 
