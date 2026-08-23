@@ -2,8 +2,8 @@ apiVersion: v2
 name: oom-watcher
 description: eBPF-based OOM watcher for Kubernetes with Prometheus integration
 type: application
-version: 0.5.0
-appVersion: "0.5.0"
+version: 0.6.0
+appVersion: "0.6.0"
 keywords:
   - ebpf
   - oom

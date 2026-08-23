@@ -1,3 +1,10 @@
+# [0.6.0](https://github.com/Perun-Engineering/ebpf-oom-watcher/compare/v0.5.0...v0.6.0) (2026-08-23)
+
+
+### Features
+
+* **health:** give the liveness probe something to assert ([#80](https://github.com/Perun-Engineering/ebpf-oom-watcher/issues/80)) ([e13b77a](https://github.com/Perun-Engineering/ebpf-oom-watcher/commit/e13b77a73776cb685e4fa21508db4676d36daff1))
+
 # [0.5.0](https://github.com/Perun-Engineering/ebpf-oom-watcher/compare/v0.4.1...v0.5.0) (2026-08-23)
 
 
