@@ -55,8 +55,8 @@ The OOM Watcher exposes the following Prometheus metrics on port 8080:
 
 ### Series eviction
 
-The four per-container metrics above are keyed on pod name, so an OOM-looping pod mints a
-new series on every restart. Nothing in a Prometheus client library expires a series, so
+`oom_kills_total`, `oom_memory_usage_bytes` and `oom_last_timestamp` are keyed on pod name,
+so an OOM-looping pod mints a new series on every restart. Nothing in a Prometheus client library expires a series, so
 the watcher sweeps them itself: a label set with no OOM event for `SERIES_TTL_SECONDS`
 (default 30 min) is deleted, and `oom_series_evicted_total` counts the deletions. Node-scoped
 metrics are never evicted — there is one of each per process.

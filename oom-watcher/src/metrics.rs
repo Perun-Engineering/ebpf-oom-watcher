@@ -13,11 +13,12 @@ use crate::resolve::ResolutionOutcome;
 
 /// The `memory_type` label values of `oom_memory_usage_bytes`, in the order
 /// [`memory_values`] returns the figures. Recording and eviction both iterate this, so a
-/// new kind cannot be added to one and forgotten in the other.
+/// kind cannot be added to one and forgotten in the other — [`memory_values`] returns an
+/// array of exactly this length, so adding a label here without its figure fails to build.
 const MEMORY_TYPES: [&str; 4] = ["total_vm", "anon_rss", "file_rss", "shmem_rss"];
 
 /// The memory figures of `raw`, in kilobytes, ordered to match [`MEMORY_TYPES`].
-fn memory_values(raw: &OomKillEvent) -> [u64; 4] {
+fn memory_values(raw: &OomKillEvent) -> [u64; MEMORY_TYPES.len()] {
     [raw.total_vm, raw.anon_rss, raw.file_rss, raw.shmem_rss]
 }
 
@@ -75,6 +76,10 @@ pub struct MetricsCollector {
     /// When each per-container label set was last recorded, in wall-clock seconds. This is
     /// the only record of a series' age — a Prometheus registry keeps no such thing — so
     /// it is what [`Self::evict_stale`] sweeps.
+    ///
+    /// Poisoning is recovered from rather than propagated at both use sites: a panic
+    /// elsewhere cannot leave timestamps logically inconsistent, and taking the watcher
+    /// down over a poisoned bookkeeping map would lose real OOM events.
     last_seen: Mutex<HashMap<SeriesKey, u64>>,
 }
 
@@ -195,19 +200,25 @@ impl MetricsCollector {
     /// is scraped takes its increments with it. Node-scoped families are left alone; their
     /// cardinality is one series per process.
     pub fn evict_stale(&self, now: u64, ttl_secs: u64) -> usize {
+        // The guard is deliberately held across the removals below. Releasing it first
+        // would let a concurrent `record_oom_event` land between the scan and the delete:
+        // it would recreate the series and stamp a fresh last-seen time, then have that
+        // series deleted underneath it — losing the increment and leaving a last-seen
+        // entry with nothing behind it until the next event. Deadlock is not possible,
+        // because `with_label_values` releases the metric's own lock before returning, so
+        // no thread ever holds one while waiting for this mutex.
+        let mut last_seen = self.last_seen.lock().unwrap_or_else(|e| e.into_inner());
+
         let mut stale = Vec::new();
-        {
-            let mut last_seen = self.last_seen.lock().unwrap_or_else(|e| e.into_inner());
-            // `saturating_sub` absorbs a backwards wall-clock step (an NTP correction),
-            // which then reads as a fresh series and merely delays eviction by one sweep.
-            last_seen.retain(|key, &mut seen| {
-                let fresh = now.saturating_sub(seen) < ttl_secs;
-                if !fresh {
-                    stale.push(key.clone());
-                }
-                fresh
-            });
-        }
+        // `saturating_sub` absorbs a backwards wall-clock step (an NTP correction), which
+        // then reads as a fresh series and merely delays eviction by one sweep.
+        last_seen.retain(|key, &mut seen| {
+            let fresh = now.saturating_sub(seen) < ttl_secs;
+            if !fresh {
+                stale.push(key.clone());
+            }
+            fresh
+        });
 
         for key in &stale {
             self.remove_series(key);
@@ -220,14 +231,12 @@ impl MetricsCollector {
     /// `remove_label_values` errors when the series is absent, which is not a failure
     /// here — it means there was nothing left to delete.
     fn remove_series(&self, key: &SeriesKey) {
-        let [node, namespace, pod, container] = key.labels();
+        let labels = key.labels();
 
-        let _ = self
-            .oom_kills_total
-            .remove_label_values(&[node, namespace, pod, container]);
-        let _ = self
-            .oom_last_timestamp
-            .remove_label_values(&[node, namespace, pod, container]);
+        let _ = self.oom_kills_total.remove_label_values(&labels);
+        let _ = self.oom_last_timestamp.remove_label_values(&labels);
+
+        let [node, namespace, pod, container] = labels;
         for memory_type in MEMORY_TYPES {
             let _ = self.oom_memory_usage_bytes.remove_label_values(&[
                 node,
