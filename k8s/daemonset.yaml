@@ -51,25 +51,29 @@ spec:
     spec:
       serviceAccountName: oom-watcher
       hostPID: true
-      hostNetwork: true
+      # No hostNetwork: the API server is reached by IP, so host networking buys nothing
+      # and would claim port 8080 on every node.
+      priorityClassName: system-node-critical
+      # A node-level DaemonSet belongs on every node, tainted pools included.
       tolerations:
-      - key: node-role.kubernetes.io/control-plane
-        operator: Exists
-        effect: NoSchedule
-      - key: node-role.kubernetes.io/master
-        operator: Exists
-        effect: NoSchedule
+      - operator: Exists
       containers:
       - name: oom-watcher
         image: ghcr.io/perun-engineering/ebpf-oom-watcher:latest
         imagePullPolicy: Always
         securityContext:
-          privileged: true
+          # On kernel >= 5.8 privileged is unnecessary: CAP_BPF loads the program and
+          # creates the maps, CAP_PERFMON attaches it to the tracepoint, and
+          # CAP_SYS_RESOURCE covers the ring buffer against RLIMIT_MEMLOCK.
+          privileged: false
+          allowPrivilegeEscalation: false
           capabilities:
+            drop:
+            - ALL
             add:
-            - SYS_ADMIN
+            - BPF
+            - PERFMON
             - SYS_RESOURCE
-            - SYS_PTRACE
         env:
         - name: NODE_NAME
           valueFrom:

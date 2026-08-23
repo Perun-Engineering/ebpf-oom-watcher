@@ -24,7 +24,8 @@ The OOM Watcher exposes the following Prometheus metrics on port 8080:
 
 1. Kubernetes cluster with eBPF support
 2. Container runtime that supports cgroups v1 or v2
-3. Privileged containers allowed (for eBPF program loading)
+3. A PodSecurity policy that permits `CAP_BPF`, `CAP_PERFMON` and `CAP_SYS_RESOURCE`
+   (the `baseline` profile does; `restricted` does not)
 
 ### Build and Deploy
 
@@ -76,9 +77,19 @@ The OOM Watcher requires elevated privileges to:
 - Read cgroup information for container identification
 
 The container runs with:
-- `privileged: true`
-- `hostPID: true` and `hostNetwork: true`
+- `privileged: false`, `allowPrivilegeEscalation: false`, all capabilities dropped
+  except `BPF` (load the program, create the maps), `PERFMON` (attach it to the
+  tracepoint) and `SYS_RESOURCE` (the ring buffer against `RLIMIT_MEMLOCK`). This
+  needs kernel >= 5.8; the tracepoint itself already requires 6.9.
+- `hostPID: true`, so `/proc/<pid>/cgroup` resolves the victim. No `hostNetwork` —
+  the API server is reached by IP, and it would claim port 8080 on every node.
 - Mounted host paths: `/proc`, `/sys`, `/sys/kernel/debug`, `/sys/fs/cgroup`
+- `priorityClassName: system-node-critical` and a blanket `operator: Exists`
+  toleration, so a tainted node pool still gets the DaemonSet.
+
+If a cluster defaults seccomp to `RuntimeDefault`, `bpf()` and `perf_event_open()`
+are blocked and the probe fails to load with a loud startup error. Set
+`securityContext.privileged=true` (chart) to fall back.
 
 ## Troubleshooting
 
