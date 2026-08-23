@@ -87,13 +87,15 @@ spec:
         - containerPort: 8080
           name: metrics
           protocol: TCP
+        # 23Mi RSS measured with 27 pods cached (0.4.0, 2026-08-23). No CPU limit —
+        # throttling during an OOM storm would delay the /proc read that is already
+        # racing the reaper. The memory limit is a leak backstop, not a fitted bound.
         resources:
           requests:
             memory: "64Mi"
-            cpu: "100m"
+            cpu: "50m"
           limits:
             memory: "256Mi"
-            cpu: "200m"
         volumeMounts:
         - name: proc
           mountPath: /proc
