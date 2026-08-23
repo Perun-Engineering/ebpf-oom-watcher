@@ -28,6 +28,21 @@ helm install oom-watcher helm/oom-watcher \
   --set serviceMonitor.enabled=true
 ```
 
+> [!IMPORTANT]
+> Before installing cluster-wide, check `allocatable.pods` on every node — not just CPU and
+> memory. The chart defaults to `priorityClassName: system-node-critical`, so on a node that
+> is at its pod cap the scheduler makes room by **evicting a lower-priority pod**. On EKS the
+> cap is an ENI limit and can be as low as 8, which is easy to hit on a node that looks empty
+> by CPU and memory.
+>
+> ```bash
+> kubectl get nodes -o custom-columns=NAME:.metadata.name,PODS:.status.allocatable.pods
+> ```
+>
+> Install with `--set priorityClassName=` if that trade is not wanted. The DaemonSet then
+> stays Pending on a full node rather than displacing anything — at the cost of the property
+> the default exists for, which is not being evicted under the memory pressure it watches.
+
 ### Local Development
 
 ```bash

@@ -106,7 +106,18 @@ updateStrategy:
   rollingUpdate:
     maxUnavailable: 1
 
-# A node-level DaemonSet should outrank ordinary workloads for scheduling and eviction.
+# A node-level DaemonSet should outrank ordinary workloads for scheduling and eviction: an
+# OOM watcher that gets evicted under memory pressure is useless exactly when it is needed.
+#
+# Before installing cluster-wide, check `allocatable.pods` on every node, not just CPU and
+# memory. A node at its pod cap has no room whatever its CPU and memory look like, and at
+# this priority the scheduler makes room by evicting a lower-priority pod. On EKS the cap
+# comes from the instance's ENI limit and can be as low as 8:
+#
+#   kubectl get nodes -o custom-columns=NAME:.metadata.name,PODS:.status.allocatable.pods
+#
+# Set this to "" on a cluster where that trade is not wanted; the DaemonSet then stays
+# Pending on a full node instead of displacing anything.
 priorityClassName: system-node-critical
 
 terminationGracePeriodSeconds: 30
