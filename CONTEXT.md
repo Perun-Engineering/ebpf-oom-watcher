@@ -41,7 +41,22 @@ use these terms exactly.
   `NotFound`, because the kernel sends SIGKILL *before* firing `oom:mark_victim` and the
   victim is often already reaped — the benign race. Any other read error is `Failed`, since a
   missing `hostPID` or a `/proc` that is not the host's is an operator mistake and must not
-  hide behind the race.
+  hide behind the race. The same rule governs the **pod cache**: a cache that has not synced
+  is `Failed`, never `NotFound`, because an unreachable API server is an operator problem
+  and answering "no such container" would file it under the race.
+
+- **Pod cache** (`PodCache`) — the in-memory mirror of the pods scheduled on this node, fed
+  by a `spec.nodeName`-scoped `kube::runtime::reflector`. It is where **resolution** looks up
+  the container id, and it exists because the previous implementation listed every pod on the
+  node on *every* OOM event — one API call per kill during a storm. It is deliberately the
+  only pod source: there is no falling back to a live list on a miss, so "no API call per
+  event" holds by construction. Objects are pruned (`spec`, `managedFields`, annotations) on
+  the way in, leaving only what matching reads. Not on a seam of its own — it is internal to
+  `KubernetesClient`, the way **series eviction** is internal to the Prometheus adapter — but
+  it is unit-testable regardless, because a reflector `Writer` can be driven by hand.
+  Readiness is re-read per lookup rather than latched at startup, so a cache that syncs late
+  starts serving; `main` supervises the task feeding it, since a cache nobody feeds goes
+  stale in silence.
 
 - **Container resolver** (`ContainerResolver`) — the seam for **resolution**. A trait
   exposing `node_name()` and `async resolve(pid) -> ResolutionOutcome`. `KubernetesClient`

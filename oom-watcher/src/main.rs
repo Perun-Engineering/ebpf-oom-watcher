@@ -41,20 +41,26 @@ async fn main() -> anyhow::Result<()> {
 
     // Resolver for the watch loop: Some iff in-cluster. A failure drops us to standalone
     // mode (no node, no container identity) rather than aborting startup.
-    let k8s_client = match KubernetesClient::new().await {
-        Ok(client) => {
+    //
+    // The client comes with the task feeding its pod cache. That task is what keeps
+    // resolution off the API server, so it is supervised like every other worker below —
+    // a cache nobody is feeding still answers, just with stale pods.
+    let (k8s_client, mut pod_cache) = match KubernetesClient::new().await {
+        Ok((client, cache_task)) => {
             info!(
                 "Successfully connected to Kubernetes API on node: {}",
                 client.node_name()
             );
-            Some(client)
+            (Some(client), cache_task)
         }
         Err(e) => {
             warn!(
                 "Failed to connect to Kubernetes API: {}. Running in standalone mode.",
                 e
             );
-            None
+            // Standalone mode has no cache to feed. Park a task in its place so the
+            // supervising select! keeps one arm per worker either way.
+            (None, task::spawn(std::future::pending::<()>()))
         }
     };
 
@@ -147,11 +153,16 @@ async fn main() -> anyhow::Result<()> {
             error!("Series sweeper task exited unexpectedly: {:?}", res);
             Err(anyhow!("series sweeper task exited"))
         }
+        res = &mut pod_cache => {
+            error!("Pod cache task exited unexpectedly: {:?}", res);
+            Err(anyhow!("pod cache task exited"))
+        }
     };
 
     event_processor.abort();
     metrics_server.abort();
     series_sweeper.abort();
+    pod_cache.abort();
 
     outcome
 }

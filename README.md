@@ -195,10 +195,11 @@ flowchart LR
             R --> KC["KubernetesClient\nresolve(pid)"]
             KC --> M["MetricsCollector\nrecord_oom_event"]
             M --> H["/metrics :8080\n(supervised worker)"]
+            PC[("PodCache\n(supervised worker)")] -.->|"this node's pods,\nfrom memory"| KC
         end
     end
     D -.-> M
-    KC -.->|"pods on this node\n(spec.nodeName field selector)"| API["Kubernetes API"]
+    PC -.->|"one list + watch\n(spec.nodeName field selector)"| API["Kubernetes API"]
     H -->|scrape| P["Prometheus\n(ServiceMonitor)"]
 ```
 
@@ -207,11 +208,13 @@ flowchart LR
   `mark_victim/format` before loading the probe — see [Kernel requirements](#kernel-requirements)
 - **Userland Program**: Loads the eBPF program and reads events from a BPF ring buffer,
   woken by epoll rather than polling
-- **Pod Enrichment**: Resolves the victim's pod/container from `/proc/<pid>/cgroup`, querying
-  only pods scheduled on the local node (`spec.nodeName` field selector)
+- **Pod Enrichment**: Resolves the victim's pod/container from `/proc/<pid>/cgroup`, then
+  matches it against an in-memory mirror of the pods scheduled on the local node
+  (`spec.nodeName` field selector). That mirror costs one list plus a watch for the life of
+  the process — not an API call per OOM event, which is what a kill storm used to produce
 - **Event Structure**: Captures process details including PID, memory usage, and process name
-- **Async Processing**: Tokio supervises the reader and the metrics server, so a worker crash
-  exits the process for a DaemonSet restart
+- **Async Processing**: Tokio supervises the reader, the pod cache, the series sweep and the
+  metrics server, so a worker crash exits the process for a DaemonSet restart
 
 ### Kernel requirements
 
@@ -240,8 +243,11 @@ Check a node before deploying to it:
    `./scripts/preflight-node.sh` on the node to confirm
 3. **Every event lands on `namespace="unknown"`**: check `oom_resolution_failures_total`.
    `reason="error"` means the cgroup read itself failed — usually a missing `hostPID: true`
-   or a `/proc` that is not the host's. `reason="not_found"` means the process was already
-   reaped, which is the race the probe cannot fully win
+   or a `/proc` that is not the host's — or that the pod cache has not finished its initial
+   list, which the logs will say (`Pod cache synced: N pods on node …` is the line that
+   should appear seconds after startup; `Pod cache watch error` is the one to look for if it
+   does not). `reason="not_found"` means the process was already reaped, which is the race
+   the probe cannot fully win
 4. **`oom_events_dropped_total` is climbing**: the ring buffer overflowed. Raise
    `EVENTS`'s size in `oom-watcher-ebpf/src/main.rs` (must stay a power-of-2 multiple of
    `PAGE_SIZE`)

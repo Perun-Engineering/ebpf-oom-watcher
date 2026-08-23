@@ -1,11 +1,16 @@
 use std::{fs, io, sync::LazyLock};
 
 use anyhow::{anyhow, Context, Result};
+use futures::{FutureExt, StreamExt};
 use k8s_openapi::api::core::v1::Pod;
-use kube::{api::ListParams, Api, Client, Config};
-use log::{debug, warn};
+use kube::{
+    runtime::{reflector, watcher, WatchStreamExt},
+    Api, Client, Config,
+};
+use log::{debug, info, warn};
 use oom_watcher_common::ContainerIdentity;
 use regex::Regex;
+use tokio::task::JoinHandle;
 
 use crate::resolve::{ContainerResolver, ResolutionOutcome};
 
@@ -58,14 +63,17 @@ fn extract_container_id(cgroup: &str) -> Option<String> {
 /// Match the bare container id lifted from the cgroup against the container statuses of
 /// the pods scheduled on this node, and lift the identity out of the entry that matched.
 ///
-/// Split out from the API call so the matching rules are testable against constructed pod
-/// statuses, the same way [`extract_container_id`] is testable without a live `/proc`.
+/// Split out from the pod source so the matching rules are testable against constructed
+/// pod statuses, the same way [`extract_container_id`] is testable without a live `/proc`.
 ///
 /// That status entry is the only place the runtime-prefixed container id and the image
 /// digest exist, which is also why there is no partially-filled identity: a container that
 /// does not match yields `None` and is counted as a resolution failure.
-fn identity_from_pods(pods: &[Pod], container_id: &str) -> Option<ContainerIdentity> {
-    pods.iter().find_map(|pod| {
+fn identity_from_pods<'a>(
+    pods: impl IntoIterator<Item = &'a Pod>,
+    container_id: &str,
+) -> Option<ContainerIdentity> {
+    pods.into_iter().find_map(|pod| {
         // `?` here exits this closure, not the function — a pod without statuses is
         // skipped and the search continues with the next one.
         let statuses = pod.status.as_ref()?.container_statuses.as_ref()?;
@@ -97,37 +105,151 @@ fn identity_from_pods(pods: &[Pod], container_id: &str) -> Option<ContainerIdent
     })
 }
 
+/// Strip the parts of a `Pod` nothing here reads, before it is cached.
+///
+/// Applied to the watch stream rather than to the store, so the trimmed object is what
+/// gets cloned in. Resolution reads exactly three things — `metadata.namespace`,
+/// `metadata.name` and `status.containerStatuses` — and `metadata.{name,namespace,uid}`
+/// additionally key the store, so `spec`, `managedFields` and annotations can all go.
+/// Those are the bulk of a Pod (`last-applied-configuration` alone can exceed the rest),
+/// and this cache lives in a per-node DaemonSet sized in tens of MiB.
+fn prune_for_cache(pod: &mut Pod) {
+    pod.spec = None;
+    pod.metadata.managed_fields = None;
+    pod.metadata.annotations = None;
+}
+
+/// The pods scheduled on this node, mirrored from the API server by a watch.
+///
+/// This is what keeps resolution off the API path: the previous implementation listed
+/// every pod on the node on *every* OOM event, so a kill storm turned into one API call
+/// per kill. A `spec.nodeName`-scoped reflector pays for one list plus a watch, and every
+/// lookup after that is served from memory.
+///
+/// The cache is deliberately the *only* pod source — there is no falling back to a live
+/// list on a miss, so "no API call per event" holds by construction rather than by
+/// discipline.
+struct PodCache {
+    store: reflector::Store<Pod>,
+}
+
+impl PodCache {
+    /// Start mirroring the pods on `node_name`.
+    ///
+    /// Returns the cache and the task driving the watch; the caller must keep that task
+    /// alive and supervise it, because a cache nobody is feeding goes stale in silence.
+    fn spawn(pods_api: Api<Pod>, node_name: &str) -> (Self, JoinHandle<()>) {
+        // The same field selector the per-event list used: this node's pods, not the
+        // cluster's. It also bounds what the cache costs — one node's worth of pods.
+        let config = watcher::Config::default().fields(&format!("spec.nodeName={}", node_name));
+        let (store, writer) = reflector::store();
+
+        // `modify` has to sit between the watcher and the reflector: applied after, the
+        // store would already hold the untrimmed objects.
+        let events = watcher(pods_api, config).modify(prune_for_cache);
+
+        let cache = Self { store };
+        let logger = cache.store.clone();
+        let node = node_name.to_string();
+
+        let task = tokio::spawn(async move {
+            // Both halves run for the life of the process. The log side resolves once and
+            // the watch side never does, so the task ends only if the stream ends.
+            tokio::join!(
+                async move {
+                    match logger.wait_until_ready().await {
+                        Ok(()) => info!("Pod cache synced: {} pods on node {}", logger.len(), node),
+                        Err(e) => warn!("Pod cache never synced: {}", e),
+                    }
+                },
+                reflector(writer, events)
+                    // Retry list/watch failures forever rather than ending the stream: an
+                    // API server rollout must not permanently freeze the cache.
+                    .default_backoff()
+                    .for_each(|event| {
+                        if let Err(e) = event {
+                            warn!("Pod cache watch error (retrying): {}", e);
+                        }
+                        std::future::ready(())
+                    }),
+            );
+        });
+
+        (cache, task)
+    }
+
+    /// The identity of the container with this id, according to the cache.
+    ///
+    /// `Ok(None)` is a real miss: the cache is in sync and no container on this node
+    /// carries that id. An unsynced cache is an `Err` instead, because it is not evidence
+    /// of anything — reporting it as a miss would file an unreachable API server under the
+    /// benign reap race that `oom_resolution_failures_total{reason}` exists to separate.
+    fn identity_of(&self, container_id: &str) -> Result<Option<ContainerIdentity>> {
+        self.synced()?;
+
+        let pods = self.store.state();
+        let identity = identity_from_pods(pods.iter().map(|pod| pod.as_ref()), container_id);
+        if identity.is_none() {
+            warn!("Could not find pod info for container ID: {}", container_id);
+        }
+        Ok(identity)
+    }
+
+    /// Whether the initial list has landed, without waiting for it.
+    ///
+    /// `wait_until_ready` latches when that list completes, so polling it once is a read
+    /// of that latch — and re-checking per lookup, rather than caching the answer at
+    /// startup, is what lets a cache that synced late start serving. Nothing else awaits
+    /// readiness concurrently, so this cannot steal another waiter's wakeup.
+    fn synced(&self) -> Result<()> {
+        match self.store.wait_until_ready().now_or_never() {
+            Some(Ok(())) => Ok(()),
+            // The reflector task is gone, so the cache will never sync — fatal, and the
+            // supervising `select!` in main is about to notice.
+            Some(Err(e)) => Err(anyhow!("the pod cache stopped being maintained: {}", e)),
+            None => Err(anyhow!(
+                "the pod cache has not finished its initial list of the pods on this node"
+            )),
+        }
+    }
+}
+
 pub struct KubernetesClient {
-    pods_api: Api<Pod>,
+    pods: PodCache,
     node_name: String,
 }
 
 impl KubernetesClient {
-    pub async fn new() -> Result<Self> {
+    /// Connect to the API server and start the pod cache.
+    ///
+    /// Returns the client and the task feeding its cache. Startup deliberately does *not*
+    /// block on the initial list: `/metrics` doubles as the liveness probe, so a slow API
+    /// server must not delay the HTTP bind. Until the list lands, lookups report an error
+    /// rather than a wrong answer.
+    pub async fn new() -> Result<(Self, JoinHandle<()>)> {
         let config = Config::incluster()
             .map_err(|e| anyhow!("Failed to create in-cluster config: {}", e))?;
 
         let client = Client::try_from(config)?;
         let pods_api: Api<Pod> = Api::all(client);
 
-        // Require NODE_NAME rather than defaulting to "unknown": a wrong node scopes
-        // the spec.nodeName field selector to a node with no pods, so every lookup
-        // would silently return NotFound. Failing here drops us to standalone mode.
+        // Require NODE_NAME rather than defaulting to "unknown": a wrong node scopes the
+        // watch to a node with no pods, so every lookup would silently return NotFound.
+        // Failing here drops us to standalone mode.
         let node_name = std::env::var("NODE_NAME").map_err(|_| {
             anyhow!("NODE_NAME is unset; the DaemonSet must expose it via the downward API")
         })?;
 
-        Ok(Self {
-            pods_api,
-            node_name,
-        })
+        let (pods, cache_task) = PodCache::spawn(pods_api, &node_name);
+
+        Ok((Self { pods, node_name }, cache_task))
     }
 
-    pub async fn get_container_info(&self, pid: u32) -> Result<Option<ContainerIdentity>> {
+    pub fn get_container_info(&self, pid: u32) -> Result<Option<ContainerIdentity>> {
         let container_id = self.get_container_id_from_pid(pid)?;
 
         if let Some(container_id) = container_id {
-            return self.get_pod_info_from_container_id(&container_id).await;
+            return self.pods.identity_of(&container_id);
         }
 
         Ok(None)
@@ -169,23 +291,6 @@ impl KubernetesClient {
         );
         Ok(None)
     }
-
-    async fn get_pod_info_from_container_id(
-        &self,
-        container_id: &str,
-    ) -> Result<Option<ContainerIdentity>> {
-        // Scope the query to this node so we don't list every pod in the
-        // cluster on each OOM event; the kubelet supports the spec.nodeName
-        // field selector for pods.
-        let params = ListParams::default().fields(&format!("spec.nodeName={}", self.node_name));
-        let pods = self.pods_api.list(&params).await?;
-
-        let identity = identity_from_pods(&pods.items, container_id);
-        if identity.is_none() {
-            warn!("Could not find pod info for container ID: {}", container_id);
-        }
-        Ok(identity)
-    }
 }
 
 /// The in-cluster adapter for the Resolution seam. Maps `get_container_info`'s
@@ -196,7 +301,7 @@ impl ContainerResolver for KubernetesClient {
     }
 
     async fn resolve(&self, pid: u32) -> ResolutionOutcome {
-        match self.get_container_info(pid).await {
+        match self.get_container_info(pid) {
             Ok(Some(identity)) => ResolutionOutcome::Found(identity),
             Ok(None) => ResolutionOutcome::NotFound,
             Err(e) => ResolutionOutcome::Failed(e),
@@ -207,9 +312,10 @@ impl ContainerResolver for KubernetesClient {
 #[cfg(test)]
 mod tests {
     use k8s_openapi::{
-        api::core::v1::{ContainerStatus, PodStatus},
-        apimachinery::pkg::apis::meta::v1::ObjectMeta,
+        api::core::v1::{ContainerStatus, PodSpec, PodStatus},
+        apimachinery::pkg::apis::meta::v1::{ManagedFieldsEntry, ObjectMeta},
     };
+    use kube::runtime::reflector::store::Writer;
 
     use super::*;
 
@@ -402,5 +508,151 @@ mod tests {
         let long = format!("0::/kubepods.slice/cri-containerd-{}.scope", "a".repeat(65));
         assert_eq!(extract_container_id(&short), None);
         assert_eq!(extract_container_id(&long), None);
+    }
+
+    /// A cache and the writer feeding it, standing in for the reflector task.
+    ///
+    /// The store is the real one: `Writer::apply_watcher_event` is the same call the
+    /// reflector makes, so these tests drive genuine cache states — mid-initial-list,
+    /// synced, updated, desynced — with no API server anywhere.
+    fn cache_and_writer() -> (PodCache, Writer<Pod>) {
+        let (store, writer) = reflector::store();
+        (PodCache { store }, writer)
+    }
+
+    /// Deliver an initial list, the way a freshly started watch does.
+    fn sync(writer: &mut Writer<Pod>, pods: Vec<Pod>) {
+        writer.apply_watcher_event(&watcher::Event::Init);
+        for pod in pods {
+            writer.apply_watcher_event(&watcher::Event::InitApply(pod));
+        }
+        writer.apply_watcher_event(&watcher::Event::InitDone);
+    }
+
+    #[test]
+    fn resolves_a_container_from_the_cache() {
+        let (cache, mut writer) = cache_and_writer();
+        sync(
+            &mut writer,
+            vec![pod_with(&format!("containerd://{ID}"), "repo@sha256:abc")],
+        );
+
+        let identity = cache
+            .identity_of(ID)
+            .expect("a synced cache is not an error")
+            .expect("the container is on this node");
+
+        assert_eq!(identity.pod_name, "api-7d9");
+        assert_eq!(identity.container_id, format!("containerd://{ID}"));
+    }
+
+    #[test]
+    fn a_synced_cache_that_does_not_hold_the_container_is_a_miss_not_an_error() {
+        let (cache, mut writer) = cache_and_writer();
+        sync(
+            &mut writer,
+            vec![pod_with(
+                &format!("containerd://{}", "b".repeat(64)),
+                "x@sha256:1",
+            )],
+        );
+
+        assert_eq!(
+            cache
+                .identity_of(ID)
+                .expect("a synced cache is not an error"),
+            None
+        );
+    }
+
+    #[test]
+    fn an_unsynced_cache_is_an_error_not_a_miss() {
+        // Nothing has been written yet — the initial list is still in flight, or the API
+        // server is unreachable. Answering `None` here would file that under the benign
+        // reap race; it has to reach `oom_resolution_failures_total{reason="error"}`.
+        let (cache, _writer) = cache_and_writer();
+
+        assert!(cache.identity_of(ID).is_err());
+
+        // Still an error part-way through the initial list: what has arrived so far is not
+        // yet the set of pods on this node.
+        let (cache, mut writer) = cache_and_writer();
+        writer.apply_watcher_event(&watcher::Event::Init);
+        writer.apply_watcher_event(&watcher::Event::InitApply(pod_with(
+            &format!("containerd://{ID}"),
+            "repo@sha256:abc",
+        )));
+
+        assert!(cache.identity_of(ID).is_err());
+    }
+
+    #[test]
+    fn a_lookup_starts_working_once_a_late_cache_syncs() {
+        // The reason readiness is re-checked per lookup instead of latched at startup: a
+        // watcher that only connects on its third backoff must not leave the process
+        // erroring forever.
+        let (cache, mut writer) = cache_and_writer();
+
+        assert!(cache.identity_of(ID).is_err());
+
+        sync(
+            &mut writer,
+            vec![pod_with(&format!("containerd://{ID}"), "repo@sha256:abc")],
+        );
+
+        assert!(cache
+            .identity_of(ID)
+            .expect("the cache has synced now")
+            .is_some());
+    }
+
+    #[test]
+    fn a_container_that_starts_after_the_initial_list_resolves() {
+        // The whole point of watching rather than listing once: a pod scheduled a minute
+        // from now must resolve too.
+        let (cache, mut writer) = cache_and_writer();
+        sync(&mut writer, vec![]);
+
+        assert_eq!(cache.identity_of(ID).expect("synced"), None);
+
+        writer.apply_watcher_event(&watcher::Event::Apply(pod_with(
+            &format!("containerd://{ID}"),
+            "repo@sha256:abc",
+        )));
+
+        assert!(cache.identity_of(ID).expect("synced").is_some());
+    }
+
+    #[test]
+    fn a_deleted_pod_stops_resolving() {
+        let (cache, mut writer) = cache_and_writer();
+        let pod = pod_with(&format!("containerd://{ID}"), "repo@sha256:abc");
+        sync(&mut writer, vec![pod.clone()]);
+
+        writer.apply_watcher_event(&watcher::Event::Delete(pod));
+
+        assert_eq!(cache.identity_of(ID).expect("synced"), None);
+    }
+
+    #[test]
+    fn pruning_keeps_everything_resolution_reads() {
+        // Guards the memory trim: whatever `prune_for_cache` drops, a pruned pod must
+        // still resolve to the same identity a full one does.
+        let mut pod = pod_with(&format!("containerd://{ID}"), "repo@sha256:abc");
+        pod.spec = Some(PodSpec {
+            node_name: Some("node-1".to_string()),
+            ..Default::default()
+        });
+        pod.metadata.managed_fields = Some(vec![ManagedFieldsEntry::default()]);
+        pod.metadata.annotations = Some(std::collections::BTreeMap::from([(
+            "kubectl.kubernetes.io/last-applied-configuration".to_string(),
+            "{}".to_string(),
+        )]));
+
+        let full = identity_from_pods(&[pod.clone()], ID).expect("the unpruned pod resolves");
+        prune_for_cache(&mut pod);
+        let pruned = identity_from_pods(&[pod], ID).expect("the pruned pod still resolves");
+
+        assert_eq!(full, pruned);
     }
 }
