@@ -1,3 +1,10 @@
+# [0.5.0](https://github.com/Perun-Engineering/ebpf-oom-watcher/compare/v0.4.1...v0.5.0) (2026-08-23)
+
+
+### Features
+
+* **helm:** harden DaemonSet defaults and keep the chart on the released version ([#79](https://github.com/Perun-Engineering/ebpf-oom-watcher/issues/79)) ([58454db](https://github.com/Perun-Engineering/ebpf-oom-watcher/commit/58454dbea56a40525017a4bb54b327321d8a50af))
+
 ## [0.4.1](https://github.com/Perun-Engineering/ebpf-oom-watcher/compare/v0.4.0...v0.4.1) (2026-08-23)
 
 
