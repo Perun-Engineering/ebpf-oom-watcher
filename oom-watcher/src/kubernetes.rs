@@ -1,6 +1,6 @@
-use std::fs;
+use std::{fs, io, sync::LazyLock};
 
-use anyhow::{anyhow, Result};
+use anyhow::{anyhow, Context, Result};
 use k8s_openapi::api::core::v1::Pod;
 use kube::{api::ListParams, Api, Client, Config};
 use log::{debug, warn};
@@ -8,6 +8,52 @@ use oom_watcher_common::ContainerIdentity;
 use regex::Regex;
 
 use crate::resolve::{ContainerResolver, ResolutionOutcome};
+
+/// Patterns that lift a 64-hex container id out of a `/proc/<pid>/cgroup` line, tried in
+/// order. Compiled once — this runs on every OOM event.
+///
+/// The layouts differ by runtime *and* cgroup driver, and the systemd-driver ones are the
+/// common case on current clusters:
+///
+/// | Runtime / driver              | Line                                                    |
+/// |-------------------------------|---------------------------------------------------------|
+/// | containerd, systemd (cgroup2) | `…/cri-containerd-<id>.scope`                            |
+/// | CRI-O, systemd                | `…/crio-<id>.scope`                                      |
+/// | Docker, systemd               | `…/docker-<id>.scope`                                    |
+/// | Docker, cgroupfs              | `/docker/<id>`                                           |
+/// | kubelet cgroupfs, burstable   | `/kubepods/burstable/pod<uid>/<id>`                      |
+/// | kubelet cgroupfs, guaranteed  | `/kubepods/pod<uid>/<id>`  (no QoS segment)              |
+///
+/// The last pattern is a catch-all — any 64-hex run delimited by `/` or `-` — so a runtime
+/// not enumerated above still resolves instead of falling through to `unknown`. It subsumes
+/// the others; they are kept ahead of it for precedence, so that a line carrying more than
+/// one 64-hex segment yields the runtime-prefixed one rather than whichever came first.
+///
+/// `(?:[^0-9a-f]|$)` after each capture is load-bearing: without it a *longer* hex run
+/// matches on its first 64 characters. `regex` has no lookahead, so the boundary is
+/// consumed outside the capture group.
+static CONTAINER_ID_PATTERNS: LazyLock<Vec<Regex>> = LazyLock::new(|| {
+    [
+        r"(?:cri-containerd|crio|docker|libpod)[-/]([0-9a-f]{64})(?:[^0-9a-f]|$)",
+        r"/kubepods.*?/([0-9a-f]{64})(?:[^0-9a-f]|$)",
+        r"[-/]([0-9a-f]{64})(?:[^0-9a-f]|$)",
+    ]
+    .iter()
+    .map(|p| Regex::new(p).expect("container id patterns are valid"))
+    .collect()
+});
+
+/// Pull the container id out of the contents of a `/proc/<pid>/cgroup` file.
+///
+/// Split out from the read so the pattern set is testable against captured cgroup files
+/// without a live `/proc`.
+fn extract_container_id(cgroup: &str) -> Option<String> {
+    CONTAINER_ID_PATTERNS.iter().find_map(|re| {
+        re.captures(cgroup)
+            .and_then(|c| c.get(1))
+            .map(|m| m.as_str().to_string())
+    })
+}
 
 pub struct KubernetesClient {
     pods_api: Api<Pod>,
@@ -45,31 +91,34 @@ impl KubernetesClient {
         Ok(None)
     }
 
+    /// Read the killed process's cgroup and lift its container id out.
+    ///
+    /// `Ok(None)` means "looked, found nothing" — the process is gone (the common case: the
+    /// kernel sends SIGKILL *before* firing `oom:mark_victim`, so we are always racing the
+    /// reaper) or it was never in a container. Every *other* read failure is an `Err`: a
+    /// missing `hostPID`, a `/proc` that isn't the host's, or an EPERM are operator
+    /// mistakes, and collapsing them into `NotFound` makes them indistinguishable from the
+    /// benign race in both the logs and `oom_resolution_failures_total`.
     fn get_container_id_from_pid(&self, pid: u32) -> Result<Option<String>> {
         let cgroup_path = format!("/proc/{}/cgroup", pid);
         let content = match fs::read_to_string(&cgroup_path) {
             Ok(content) => content,
-            Err(_) => {
-                debug!("Could not read cgroup file for PID {}", pid);
+            Err(e) if e.kind() == io::ErrorKind::NotFound => {
+                debug!(
+                    "PID {} was already reaped before we could read its cgroup",
+                    pid
+                );
                 return Ok(None);
+            }
+            Err(e) => {
+                return Err(e).context(format!(
+                    "could not read {cgroup_path} (is hostPID set and /proc mounted from the host?)"
+                ))
             }
         };
 
-        // Extract container ID from cgroup path
-        // Formats can vary: docker, containerd, cri-o
-        let patterns = [
-            r"/docker/([a-f0-9]{64})",                  // Docker
-            r"/kubepods/[^/]*/pod[^/]*/([a-f0-9]{64})", // Containerd/CRI-O
-            r"cri-containerd-([a-f0-9]{64})",           // CRI-containerd
-        ];
-
-        for pattern in &patterns {
-            let re = Regex::new(pattern)?;
-            if let Some(captures) = re.captures(&content) {
-                if let Some(container_id) = captures.get(1) {
-                    return Ok(Some(container_id.as_str().to_string()));
-                }
-            }
+        if let Some(container_id) = extract_container_id(&content) {
+            return Ok(Some(container_id));
         }
 
         debug!(
@@ -141,5 +190,78 @@ impl ContainerResolver for KubernetesClient {
             Ok(None) => ResolutionOutcome::NotFound,
             Err(e) => ResolutionOutcome::Failed(e),
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    const ID: &str = "3b2f1c8e9d4a5b6c7e8f9a0b1c2d3e4f5a6b7c8d9e0f1a2b3c4d5e6f7a8b9c0d";
+
+    /// Every layout the pattern set claims to handle, as the line actually appears in
+    /// `/proc/<pid>/cgroup`. Each case is a runtime + cgroup-driver combination seen in the
+    /// wild; the previous three-pattern set silently missed the last four.
+    #[test]
+    fn extracts_the_container_id_from_every_supported_layout() {
+        let cases = [
+            (
+                "containerd + systemd (cgroup v2)",
+                format!("0::/kubepods.slice/kubepods-burstable.slice/kubepods-burstable-poda1b2.slice/cri-containerd-{ID}.scope"),
+            ),
+            (
+                "CRI-O + systemd",
+                format!("0::/kubepods.slice/kubepods-besteffort.slice/kubepods-besteffort-poda1b2.slice/crio-{ID}.scope"),
+            ),
+            (
+                "Docker + systemd",
+                format!("0::/kubepods.slice/kubepods-burstable.slice/kubepods-burstable-poda1b2.slice/docker-{ID}.scope"),
+            ),
+            ("Docker + cgroupfs", format!("11:memory:/docker/{ID}")),
+            (
+                "kubelet cgroupfs, burstable QoS",
+                format!("11:memory:/kubepods/burstable/poda1b2-c3d4/{ID}"),
+            ),
+            (
+                "kubelet cgroupfs, guaranteed QoS (no QoS segment)",
+                format!("11:memory:/kubepods/poda1b2-c3d4/{ID}"),
+            ),
+        ];
+
+        for (label, cgroup) in cases {
+            assert_eq!(
+                extract_container_id(&cgroup).as_deref(),
+                Some(ID),
+                "failed to extract container id for {label}"
+            );
+        }
+    }
+
+    #[test]
+    fn extracts_from_a_multi_line_cgroup_v1_file() {
+        let cgroup = format!(
+            "12:pids:/kubepods/burstable/poda1b2/{ID}\n\
+             11:memory:/kubepods/burstable/poda1b2/{ID}\n\
+             0::/\n"
+        );
+        assert_eq!(extract_container_id(&cgroup).as_deref(), Some(ID));
+    }
+
+    #[test]
+    fn finds_nothing_for_a_process_outside_a_container() {
+        assert_eq!(
+            extract_container_id("0::/system.slice/sshd.service\n"),
+            None
+        );
+        assert_eq!(extract_container_id("0::/\n"), None);
+    }
+
+    #[test]
+    fn ignores_hex_runs_that_are_not_container_ids() {
+        // 63 and 65 hex chars must not pass for a 64-char id.
+        let short = format!("0::/kubepods.slice/cri-containerd-{}.scope", "a".repeat(63));
+        let long = format!("0::/kubepods.slice/cri-containerd-{}.scope", "a".repeat(65));
+        assert_eq!(extract_container_id(&short), None);
+        assert_eq!(extract_container_id(&long), None);
     }
 }

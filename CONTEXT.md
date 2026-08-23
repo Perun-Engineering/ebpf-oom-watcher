@@ -32,6 +32,12 @@ use these terms exactly.
   **metrics recorder** and logs the two failure outcomes distinctly, then collapses to
   "no identity" via `ResolutionOutcome::identity()` before handing off to **enrichment**.
 
+  The `NotFound`/`Failed` split is drawn at the `/proc/<pid>/cgroup` read: `ENOENT` is
+  `NotFound`, because the kernel sends SIGKILL *before* firing `oom:mark_victim` and the
+  victim is often already reaped — the benign race. Any other read error is `Failed`, since a
+  missing `hostPID` or a `/proc` that is not the host's is an operator mistake and must not
+  hide behind the race.
+
 - **Container resolver** (`ContainerResolver`) — the seam for **resolution**. A trait
   exposing `node_name()` and `async resolve(pid) -> ResolutionOutcome`. `KubernetesClient`
   is the in-cluster adapter (maps `Ok(Some)`→`Found`, `Ok(None)`→`NotFound`, `Err`→`Failed`);
@@ -55,13 +61,31 @@ use these terms exactly.
 
 - **OOM event source** (`OomEventSource`) — the seam for where **OOM kill events** reach
   userspace. A trait exposing `async next(&mut self) -> Option<OomKillEvent>`; `None` means
-  the stream has ended. `RingBufSource` is the in-cluster adapter — it owns the eBPF ring
+  the stream has ended. It also exposes `dropped_total() -> Option<u64>`, defaulted to `None`
+  — see **dropped total**. `RingBufSource` is the in-cluster adapter — it owns the eBPF ring
   buffer, performs the single `unsafe` decode (`read_unaligned` + short-read guard), and
-  hides the drain/100 ms-poll so it only yields whole events and never returns `None`.
-  `VecSource` (test) and `ParkSource` (non-eBPF build; parks forever) are the other adapters.
+  hides the epoll wait (via `tokio::io::unix::AsyncFd`) so it only yields whole events.
+  It drains the ring fully into a pending queue before clearing readiness, so handing out one
+  event at a time cannot strand records until the next wakeup. `VecSource` (test) and
+  `ParkSource` (non-eBPF build; parks forever) are the other adapters.
+
+- **Dropped total** — the monotonic count of **OOM kill events** the probe could not enqueue
+  because the ring buffer was full, kept in the `DROPPED` per-CPU map and summed across CPUs
+  by `RingBufSource`. Reported to the **metrics recorder** after each event and exposed as
+  `oom_events_dropped_total`. Only the ring-buffer adapter can observe it; every other source
+  returns `None`. Silent undercounting is the failure this exists to prevent.
+
+- **Tracepoint layout check** (`tracepoint::verify_kernel_layout`) — the startup assertion
+  that the running kernel's `oom:mark_victim` trace entry matches the fixed `#[repr(C)]`
+  struct the probe decodes. The layout is the one Linux 6.9 introduced; before 6.9 the
+  tracepoint carries only `pid`, yet still attaches, so the probe would pair correct PIDs with
+  adjacent trace-buffer noise. A mismatch is a hard startup failure. Parsing the `format` file
+  is split from reading it, so the decision is testable against captured `format` files.
 
 - **Metrics recorder** (`MetricsRecorder`) — the seam for recording, decoupling the **watch
-  loop** from Prometheus. A trait exposing `record_resolution_outcome(node, &outcome)` and
-  `record_oom_event(&enriched)`. `MetricsCollector` is the Prometheus adapter (recording
+  loop** from Prometheus. A trait exposing `record_resolution_outcome(node, &outcome)`,
+  `record_oom_event(&enriched)`, and `record_dropped_total(node, total)` — the last takes an
+  absolute **dropped total**, and the Prometheus adapter advances its counter by the delta.
+  `MetricsCollector` is the Prometheus adapter (recording
   only — HTTP serving lives in the `http` module so axum no longer leaks through its
   interface); a test spy is the second adapter.

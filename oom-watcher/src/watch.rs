@@ -22,6 +22,14 @@ use crate::{
 #[allow(async_fn_in_trait)]
 pub trait OomEventSource {
     async fn next(&mut self) -> Option<OomKillEvent>;
+
+    /// Events the source knows it lost before they reached us, as a monotonic total.
+    /// `None` when the adapter cannot observe drops — the default, since only the ring
+    /// buffer can. Reported after each event so a full buffer shows up as a counter rather
+    /// than as an unexplained gap in `oom_kills_total`.
+    fn dropped_total(&self) -> Option<u64> {
+        None
+    }
 }
 
 /// Run the watch loop: drain `source`, processing each OOM kill event, until it ends.
@@ -37,7 +45,16 @@ pub async fn run<S, R, C>(
 {
     while let Some(raw_event) = source.next().await {
         process_event(&raw_event, resolver.as_ref(), recorder, now()).await;
+        if let Some(total) = source.dropped_total() {
+            recorder.record_dropped_total(node_label(resolver.as_ref()), total);
+        }
     }
+}
+
+/// The node label for recorder calls: known iff we have a resolver, matching the
+/// enrichment rule and the `unknown` fallback the Prometheus adapter already uses.
+fn node_label(resolver: Option<&impl ContainerResolver>) -> &str {
+    resolver.map_or("unknown", ContainerResolver::node_name)
 }
 
 /// Process a single OOM kill event: run resolution (recording the outcome), collapse to an
@@ -108,17 +125,38 @@ mod tests {
     use crate::resolve::{Behavior, FakeResolver};
 
     /// In-memory event source — the second adapter for [`OomEventSource`], so the seam is
-    /// real and the loop is drivable in tests.
-    struct VecSource(VecDeque<OomKillEvent>);
+    /// real and the loop is drivable in tests. `drops` is the total the source claims to
+    /// have lost, mirroring the ring buffer's monotonic counter.
+    struct VecSource {
+        events: VecDeque<OomKillEvent>,
+        drops: Option<u64>,
+    }
 
     impl OomEventSource for VecSource {
         async fn next(&mut self) -> Option<OomKillEvent> {
-            self.0.pop_front()
+            self.events.pop_front()
+        }
+
+        fn dropped_total(&self) -> Option<u64> {
+            self.drops
         }
     }
 
     fn source(events: impl IntoIterator<Item = OomKillEvent>) -> VecSource {
-        VecSource(events.into_iter().collect())
+        VecSource {
+            events: events.into_iter().collect(),
+            drops: None,
+        }
+    }
+
+    fn source_reporting_drops(
+        events: impl IntoIterator<Item = OomKillEvent>,
+        drops: u64,
+    ) -> VecSource {
+        VecSource {
+            events: events.into_iter().collect(),
+            drops: Some(drops),
+        }
     }
 
     /// Recording spy — the second adapter for [`MetricsRecorder`]. Captures every call so
@@ -127,6 +165,7 @@ mod tests {
     struct SpyRecorder {
         outcomes: RefCell<Vec<(String, &'static str)>>,
         events: RefCell<Vec<EnrichedOomEvent>>,
+        drops: RefCell<Vec<(String, u64)>>,
     }
 
     impl MetricsRecorder for SpyRecorder {
@@ -142,12 +181,15 @@ mod tests {
         fn record_oom_event(&self, event: &EnrichedOomEvent) {
             self.events.borrow_mut().push(event.clone());
         }
+
+        fn record_dropped_total(&self, node: &str, total: u64) {
+            self.drops.borrow_mut().push((node.to_string(), total));
+        }
     }
 
     fn raw(pid: u32) -> OomKillEvent {
         OomKillEvent {
             pid,
-            tgid: pid,
             comm: *b"target\0\0\0\0\0\0\0\0\0\0",
             total_vm: 100,
             anon_rss: 50,
@@ -246,6 +288,51 @@ mod tests {
 
         assert_eq!(spy.events.borrow()[0].node_name, None);
         assert!(spy.outcomes.borrow().is_empty());
+    }
+
+    #[tokio::test]
+    async fn reports_the_sources_drop_total_alongside_each_event() {
+        let spy = SpyRecorder::default();
+        let resolver = Some(FakeResolver {
+            node: "node-1".into(),
+            behavior: Behavior::NotFound,
+        });
+
+        run(
+            source_reporting_drops([raw(1), raw(2)], 4),
+            resolver,
+            &spy,
+            clock,
+        )
+        .await;
+
+        assert_eq!(
+            *spy.drops.borrow(),
+            vec![("node-1".to_string(), 4), ("node-1".to_string(), 4)]
+        );
+    }
+
+    #[tokio::test]
+    async fn reports_no_drops_when_the_source_cannot_observe_them() {
+        let spy = SpyRecorder::default();
+        let resolver = Some(FakeResolver {
+            node: "node-1".into(),
+            behavior: Behavior::NotFound,
+        });
+
+        run(source([raw(1)]), resolver, &spy, clock).await;
+
+        assert!(spy.drops.borrow().is_empty());
+    }
+
+    #[tokio::test]
+    async fn labels_drops_unknown_in_standalone_mode() {
+        let spy = SpyRecorder::default();
+        let resolver: Option<FakeResolver> = None;
+
+        run(source_reporting_drops([raw(1)], 2), resolver, &spy, clock).await;
+
+        assert_eq!(*spy.drops.borrow(), vec![("unknown".to_string(), 2)]);
     }
 
     #[tokio::test]

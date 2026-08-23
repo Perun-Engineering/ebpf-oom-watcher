@@ -4,6 +4,7 @@ mod kubernetes;
 mod metrics;
 mod resolve;
 mod source;
+mod tracepoint;
 mod watch;
 
 use std::{
@@ -94,7 +95,7 @@ async fn main() -> anyhow::Result<()> {
     // dies, return an error so the process exits non-zero and the DaemonSet restarts the
     // pod, rather than staying up but no longer watching.
     let outcome: anyhow::Result<()> = tokio::select! {
-        res = signal::ctrl_c() => {
+        res = shutdown_signal() => {
             res?;
             info!("Shutting down OOM Watcher...");
             Ok(())
@@ -113,6 +114,26 @@ async fn main() -> anyhow::Result<()> {
     metrics_server.abort();
 
     outcome
+}
+
+/// Resolve when the process is asked to stop.
+///
+/// SIGTERM is the one that matters in a cluster: it is what the kubelet sends on pod
+/// deletion, and ignoring it means every rollout waits out the full
+/// `terminationGracePeriodSeconds` before the container is SIGKILLed. SIGINT is kept for
+/// running the binary by hand.
+async fn shutdown_signal() -> anyhow::Result<()> {
+    let mut sigterm = signal::unix::signal(signal::unix::SignalKind::terminate())?;
+
+    tokio::select! {
+        res = signal::ctrl_c() => {
+            res?;
+            info!("Received SIGINT");
+        }
+        _ = sigterm.recv() => info!("Received SIGTERM"),
+    }
+
+    Ok(())
 }
 
 /// Wall-clock seconds since the Unix epoch — the clock injected into the watch loop.

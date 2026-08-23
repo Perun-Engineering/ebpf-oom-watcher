@@ -5,6 +5,9 @@ repos:
       - id: trailing-whitespace
       - id: end-of-file-fixer
       - id: check-yaml
+        # k8s/daemonset.yaml bundles ServiceAccount, ClusterRole, binding,
+        # DaemonSet and Service in one stream.
+        args: [--allow-multiple-documents]
         exclude: ^helm/
       - id: check-added-large-files
       - id: check-merge-conflict

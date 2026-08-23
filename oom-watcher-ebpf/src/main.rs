@@ -2,18 +2,36 @@
 #![no_main]
 
 use aya_ebpf::{
-    helpers::{bpf_get_current_pid_tgid, bpf_probe_read_kernel, bpf_probe_read_kernel_str_bytes},
+    helpers::{bpf_probe_read_kernel, bpf_probe_read_kernel_str_bytes},
     macros::{map, tracepoint},
-    maps::ring_buf::RingBuf,
+    maps::{PerCpuArray, RingBuf},
     programs::TracePointContext,
     EbpfContext,
 };
 use oom_watcher_common::OomKillEvent;
 
+/// Ring buffer for completed events.
+///
+/// The kernel requires this to be a power-of-two multiple of `PAGE_SIZE`. 256 KiB satisfies
+/// that for every page size in use — including the 64 KiB pages of `CONFIG_ARM64_64K_PAGES`
+/// kernels (RHEL 9 aarch64, Oracle UEK aarch64), where anything under 64 KiB makes map
+/// creation fail with `EINVAL` and the program never loads. It is also deep enough (~3k
+/// events) to ride out an OOM storm between userspace wakeups.
 #[map]
-static mut EVENTS: RingBuf = RingBuf::with_byte_size(4096, 0);
+static mut EVENTS: RingBuf = RingBuf::with_byte_size(256 * 1024, 0);
 
-// Tracepoint data structure matching the format from /sys/kernel/tracing/events/oom/mark_victim/format
+/// Events the probe could not enqueue because [`EVENTS`] was full. Surfaced to userspace as
+/// `oom_events_dropped_total` — undercounting OOM kills silently is worse than reporting the
+/// gap. Per-CPU so the increment needs no atomics.
+#[map]
+static mut DROPPED: PerCpuArray<u64> = PerCpuArray::with_max_entries(1, 0);
+
+/// The `oom:mark_victim` trace entry, as laid out by the kernel from Linux 6.9 onward
+/// (commit "mm: Update mark_victim tracepoints fields"). The offsets below are asserted
+/// against the live `/sys/kernel/tracing/events/oom/mark_victim/format` at userspace
+/// startup, which refuses to run rather than decode a layout it does not recognise — on
+/// kernels before 6.9 the entry is just `common_*` plus `pid`, and reading this struct off
+/// it would yield real PIDs paired with adjacent trace-buffer noise.
 #[repr(C)]
 struct MarkVictimArgs {
     common_type: u16,
@@ -32,12 +50,8 @@ struct MarkVictimArgs {
     oom_score_adj: i16, // offset:64
 }
 
-// Use the oom:mark_victim tracepoint which is available on this kernel
 #[tracepoint]
 pub fn mark_victim(ctx: TracePointContext) -> u32 {
-    let tgid_pid = bpf_get_current_pid_tgid() as u64;
-    let current_tgid = (tgid_pid >> 32) as u32;
-
     // Read tracepoint arguments
     let args: MarkVictimArgs =
         match unsafe { bpf_probe_read_kernel(ctx.as_ptr() as *const MarkVictimArgs) } {
@@ -53,7 +67,6 @@ pub fn mark_victim(ctx: TracePointContext) -> u32 {
 
     let event = OomKillEvent {
         pid: args.pid as u32,
-        tgid: current_tgid,
         comm,
         total_vm: args.total_vm,
         anon_rss: args.anon_rss,
@@ -65,9 +78,16 @@ pub fn mark_victim(ctx: TracePointContext) -> u32 {
     };
 
     unsafe {
-        // Access the mutable static through a raw pointer to avoid creating a
-        // shared reference to it (see the `static_mut_refs` lint).
-        let _ = (*core::ptr::addr_of_mut!(EVENTS)).output::<OomKillEvent>(&event, 0);
+        // Access the mutable statics through raw pointers to avoid creating shared
+        // references to them (see the `static_mut_refs` lint).
+        if (*core::ptr::addr_of_mut!(EVENTS))
+            .output::<OomKillEvent>(&event, 0)
+            .is_err()
+        {
+            if let Some(dropped) = (*core::ptr::addr_of_mut!(DROPPED)).get_ptr_mut(0) {
+                *dropped += 1;
+            }
+        }
     }
 
     0

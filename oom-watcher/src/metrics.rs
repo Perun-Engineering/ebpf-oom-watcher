@@ -1,3 +1,5 @@
+use std::sync::atomic::{AtomicU64, Ordering};
+
 use oom_watcher_common::EnrichedOomEvent;
 use prometheus::{CounterVec, GaugeVec, Registry, TextEncoder};
 
@@ -13,12 +15,15 @@ pub trait MetricsRecorder {
 
     /// Record an enriched OOM event: kill counts, memory gauges, and timestamp.
     fn record_oom_event(&self, event: &EnrichedOomEvent);
+
+    /// Record the source's monotonic count of events lost before they reached us.
+    /// Called with an absolute total, not a delta.
+    fn record_dropped_total(&self, node: &str, total: u64);
 }
 
 /// The Prometheus adapter for the [`MetricsRecorder`] seam. Owns the registry and the
 /// metric families; HTTP serving lives in [`crate::http`] so axum does not leak through
 /// this interface.
-#[derive(Clone)]
 pub struct MetricsCollector {
     registry: Registry,
     oom_kills_total: CounterVec,
@@ -26,6 +31,10 @@ pub struct MetricsCollector {
     oom_memory_usage_bytes: GaugeVec,
     oom_last_timestamp: GaugeVec,
     oom_resolution_failures_total: CounterVec,
+    oom_events_dropped_total: CounterVec,
+    /// Last absolute drop total seen from the source, so the counter can be advanced by the
+    /// delta. There is exactly one node per process, so a single slot suffices.
+    last_dropped_total: AtomicU64,
 }
 
 impl MetricsCollector {
@@ -71,6 +80,15 @@ impl MetricsCollector {
         )
         .expect("Failed to create oom_resolution_failures_total metric");
 
+        let oom_events_dropped_total = CounterVec::new(
+            prometheus::Opts::new(
+                "oom_events_dropped_total",
+                "OOM events the eBPF probe could not enqueue because the ring buffer was full",
+            ),
+            &["node"],
+        )
+        .expect("Failed to create oom_events_dropped_total metric");
+
         registry
             .register(Box::new(oom_kills_total.clone()))
             .expect("Failed to register oom_kills_total");
@@ -86,6 +104,9 @@ impl MetricsCollector {
         registry
             .register(Box::new(oom_resolution_failures_total.clone()))
             .expect("Failed to register oom_resolution_failures_total");
+        registry
+            .register(Box::new(oom_events_dropped_total.clone()))
+            .expect("Failed to register oom_events_dropped_total");
 
         Self {
             registry,
@@ -94,6 +115,8 @@ impl MetricsCollector {
             oom_memory_usage_bytes,
             oom_last_timestamp,
             oom_resolution_failures_total,
+            oom_events_dropped_total,
+            last_dropped_total: AtomicU64::new(0),
         }
     }
 
@@ -161,6 +184,21 @@ impl MetricsRecorder for MetricsCollector {
             .with_label_values(&[node, namespace, pod, container])
             .set(event.timestamp as f64);
     }
+
+    /// Advance the counter by the delta since the last reading. `checked_sub` guards the
+    /// one case the total can appear to move backwards: a per-CPU sum re-taken across a
+    /// CPU hotplug. A counter must never be handed a negative increment.
+    fn record_dropped_total(&self, node: &str, total: u64) {
+        let previous = self.last_dropped_total.swap(total, Ordering::Relaxed);
+        let Some(delta) = total.checked_sub(previous) else {
+            return;
+        };
+        if delta > 0 {
+            self.oom_events_dropped_total
+                .with_label_values(&[node])
+                .inc_by(delta as f64);
+        }
+    }
 }
 
 #[cfg(test)]
@@ -191,5 +229,43 @@ mod tests {
             out.contains("oom_resolution_failures_total{node=\"node-1\",reason=\"not_found\"} 2")
         );
         assert!(out.contains("oom_resolution_failures_total{node=\"node-1\",reason=\"error\"} 1"));
+    }
+
+    #[test]
+    fn advances_the_drop_counter_by_the_delta_between_readings() {
+        let collector = MetricsCollector::new();
+
+        // The source reports an absolute total each time; the counter must not restate it.
+        collector.record_dropped_total("node-1", 3);
+        collector.record_dropped_total("node-1", 3);
+        collector.record_dropped_total("node-1", 10);
+
+        assert!(collector
+            .get_metrics()
+            .contains("oom_events_dropped_total{node=\"node-1\"} 10"));
+    }
+
+    #[test]
+    fn ignores_a_drop_total_that_moves_backwards() {
+        let collector = MetricsCollector::new();
+
+        collector.record_dropped_total("node-1", 7);
+        collector.record_dropped_total("node-1", 2);
+
+        // A counter is never decremented.
+        assert!(collector
+            .get_metrics()
+            .contains("oom_events_dropped_total{node=\"node-1\"} 7"));
+    }
+
+    #[test]
+    fn does_not_emit_a_drop_series_until_something_is_dropped() {
+        let collector = MetricsCollector::new();
+
+        collector.record_dropped_total("node-1", 0);
+
+        assert!(!collector
+            .get_metrics()
+            .contains("oom_events_dropped_total{"));
     }
 }

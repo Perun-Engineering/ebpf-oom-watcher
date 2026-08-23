@@ -49,6 +49,8 @@ The OOM Watcher exposes the following Prometheus metrics on port 8080:
 - `oom_kills_per_node_total{node}` - Total OOM kills per node
 - `oom_memory_usage_bytes{node, namespace, pod, container, memory_type}` - Memory usage at OOM time
 - `oom_last_timestamp{node, namespace, pod, container}` - Timestamp of last OOM event
+- `oom_resolution_failures_total{node, reason}` - OOM events whose PID could not be resolved to a container (`reason` is `not_found` or `error`)
+- `oom_events_dropped_total{node}` - OOM events the probe could not enqueue because the ring buffer was full
 
 ### Example Queries
 
@@ -127,42 +129,76 @@ ebpf-oom-watcher/
 
 ## Architecture
 
-The watcher runs as a DaemonSet — one pod per node. An eBPF kprobe fires in
-kernel space on every OOM kill and pushes a compact event to userland, which
-enriches it with Kubernetes pod context and exposes Prometheus metrics that the
-cluster's Prometheus scrapes via a ServiceMonitor.
+The watcher runs as a DaemonSet — one pod per node. An eBPF program attached to
+the `oom:mark_victim` tracepoint fires in kernel space on every OOM kill and
+pushes a compact event to userland over a BPF ring buffer. Userland enriches it
+with Kubernetes pod context and exposes Prometheus metrics that the cluster's
+Prometheus scrapes via a ServiceMonitor.
 
 ```mermaid
 flowchart LR
     subgraph node["Kubernetes Node (one DaemonSet pod each)"]
         subgraph kernel["Kernel space"]
-            K["oom_kill_process"] -->|kprobe| E["eBPF program\nmark_victim"]
-            E -->|EVENTS PerfEventArray| B(("per-CPU\nring buffer"))
+            K["mark_oom_victim()"] -->|"oom:mark_victim tracepoint"| E["eBPF program\nmark_victim"]
+            E -->|EVENTS| B(("BPF ring buffer\n256 KiB"))
+            E -.->|"on overflow"| D(("DROPPED\nper-CPU counter"))
         end
         subgraph user["Userland (oom-watcher, Tokio)"]
-            B --> R["event reader\n(supervised worker)"]
-            R --> KC["KubernetesClient\nget_pod_info_from_container_id"]
+            B -->|epoll wakeup| R["RingBufSource\n(supervised worker)"]
+            R --> KC["KubernetesClient\nresolve(pid)"]
             KC --> M["MetricsCollector\nrecord_oom_event"]
             M --> H["/metrics :8080\n(supervised worker)"]
         end
     end
+    D -.-> M
     KC -.->|"pods on this node\n(spec.nodeName field selector)"| API["Kubernetes API"]
     H -->|scrape| P["Prometheus\n(ServiceMonitor)"]
 ```
 
-- **eBPF Program**: Attaches to the `oom_kill_process` kernel function using a kprobe
-- **Userland Program**: Loads the eBPF program and reads OOM events via PerfEventArray
-- **Pod Enrichment**: Resolves the victim's pod/container, querying only pods scheduled on the local node (`spec.nodeName` field selector)
+- **eBPF Program**: Attaches to the `oom:mark_victim` tracepoint. The trace-entry layout is
+  the one Linux 6.9 introduced, and userland asserts it against the running kernel's
+  `mark_victim/format` before loading the probe — see [Kernel requirements](#kernel-requirements)
+- **Userland Program**: Loads the eBPF program and reads events from a BPF ring buffer,
+  woken by epoll rather than polling
+- **Pod Enrichment**: Resolves the victim's pod/container from `/proc/<pid>/cgroup`, querying
+  only pods scheduled on the local node (`spec.nodeName` field selector)
 - **Event Structure**: Captures process details including PID, memory usage, and process name
-- **Async Processing**: Handles events from multiple CPUs concurrently using Tokio; the reader and metrics server run as supervised tasks so a worker crash exits the process for a DaemonSet restart
+- **Async Processing**: Tokio supervises the reader and the metrics server, so a worker crash
+  exits the process for a DaemonSet restart
+
+### Kernel requirements
+
+| Requirement | Minimum | Why |
+|---|---|---|
+| `oom:mark_victim` extended fields | **6.9** | Before 6.9 the tracepoint carries only `pid`. The memory figures do not exist |
+| BPF ring buffer (`BPF_MAP_TYPE_RINGBUF`) | 5.8 | How events reach userland |
+
+The 6.9 requirement is enforced, not advisory: on an older kernel the tracepoint still
+exists and still attaches, so the probe would report correct PIDs beside meaningless memory
+figures. The watcher refuses to start instead.
+
+Check a node before deploying to it:
+
+```bash
+./scripts/preflight-node.sh
+```
 
 ## Troubleshooting
 
 ### Common Issues
 
 1. **Permission denied**: eBPF programs require root privileges or appropriate capabilities
-2. **Kernel version**: Requires a recent Linux kernel with eBPF support (4.4+)
-3. **Memory constraints**: Large Rust builds may require sufficient memory/swap
+2. **Refuses to start, "tracepoint … does not match the layout this probe decodes"**: the
+   node's kernel is older than 6.9. See [Kernel requirements](#kernel-requirements); run
+   `./scripts/preflight-node.sh` on the node to confirm
+3. **Every event lands on `namespace="unknown"`**: check `oom_resolution_failures_total`.
+   `reason="error"` means the cgroup read itself failed — usually a missing `hostPID: true`
+   or a `/proc` that is not the host's. `reason="not_found"` means the process was already
+   reaped, which is the race the probe cannot fully win
+4. **`oom_events_dropped_total` is climbing**: the ring buffer overflowed. Raise
+   `EVENTS`'s size in `oom-watcher-ebpf/src/main.rs` (must stay a power-of-2 multiple of
+   `PAGE_SIZE`)
+5. **Memory constraints**: Large Rust builds may require sufficient memory/swap
 
 ### Docker Issues
 

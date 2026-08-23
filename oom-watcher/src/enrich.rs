@@ -40,7 +40,6 @@ mod tests {
     fn raw() -> OomKillEvent {
         OomKillEvent {
             pid: 1234,
-            tgid: 1200,
             comm: *b"python\0\0\0\0\0\0\0\0\0\0",
             total_vm: 100,
             anon_rss: 50,
