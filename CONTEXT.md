@@ -94,3 +94,12 @@ use these terms exactly.
   `MetricsCollector` is the Prometheus adapter (recording
   only — HTTP serving lives in the `http` module so axum no longer leaks through its
   interface); a test spy is the second adapter.
+
+- **Series eviction** (`MetricsCollector::evict_stale`) — what bounds cardinality. The
+  per-container metrics are keyed on pod name, so an OOM-looping pod mints a fresh label set
+  on every restart and a Prometheus registry never expires one. The adapter therefore keeps
+  its own last-seen time per label set, stamped with the event's own timestamp, and deletes
+  those older than a TTL. Not on the `MetricsRecorder` seam: it is housekeeping internal to
+  the Prometheus adapter, not something the **watch loop** reports. `main` drives it from a
+  dedicated task, because series go stale exactly when events stop and the loop is then
+  parked on epoll.

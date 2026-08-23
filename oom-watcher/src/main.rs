@@ -9,7 +9,7 @@ mod watch;
 
 use std::{
     sync::Arc,
-    time::{SystemTime, UNIX_EPOCH},
+    time::{Duration, SystemTime, UNIX_EPOCH},
 };
 
 use anyhow::anyhow;
@@ -23,6 +23,15 @@ use source::ParkSource;
 #[cfg(feature = "ebpf")]
 use source::RingBufSource;
 use tokio::{signal, task};
+
+/// How long a per-container series survives its last OOM event before the sweep deletes
+/// it. Must stay well clear of the scrape interval — the chart's `serviceMonitor.interval`
+/// defaults to 30s, so this leaves ~60x headroom.
+const DEFAULT_SERIES_TTL_SECONDS: u64 = 1800;
+
+/// How often stale series are swept. Eviction is therefore late by up to this much, which
+/// is why the sweep is far cheaper than the TTL is long.
+const DEFAULT_SERIES_SWEEP_INTERVAL_SECONDS: u64 = 300;
 
 #[tokio::main]
 async fn main() -> anyhow::Result<()> {
@@ -91,6 +100,32 @@ async fn main() -> anyhow::Result<()> {
         watch::run(source, k8s_client, recorder.as_ref(), wall_clock_secs).await;
     });
 
+    // Cardinality sweep. It has to be its own task rather than a step in the watch loop:
+    // series go stale precisely when a pod stops OOMing, and the loop is then parked on
+    // epoll with nothing to drive it.
+    let series_ttl = env_seconds("SERIES_TTL_SECONDS", DEFAULT_SERIES_TTL_SECONDS);
+    let sweep_interval = env_seconds(
+        "SERIES_SWEEP_INTERVAL_SECONDS",
+        DEFAULT_SERIES_SWEEP_INTERVAL_SECONDS,
+    );
+    info!(
+        "Evicting per-container series after {}s, swept every {}s",
+        series_ttl, sweep_interval
+    );
+    let sweeper = metrics_collector.clone();
+    let mut series_sweeper = task::spawn(async move {
+        let mut ticker = tokio::time::interval(Duration::from_secs(sweep_interval));
+        // The first tick resolves immediately; nothing is stale at startup.
+        ticker.tick().await;
+        loop {
+            ticker.tick().await;
+            let evicted = sweeper.evict_stale(wall_clock_secs(), series_ttl);
+            if evicted > 0 {
+                info!("Evicted {} stale metric series", evicted);
+            }
+        }
+    });
+
     // Run until shutdown is requested or a worker task exits unexpectedly. If a worker
     // dies, return an error so the process exits non-zero and the DaemonSet restarts the
     // pod, rather than staying up but no longer watching.
@@ -108,12 +143,28 @@ async fn main() -> anyhow::Result<()> {
             error!("Metrics server task exited unexpectedly: {:?}", res);
             Err(anyhow!("metrics server task exited"))
         }
+        res = &mut series_sweeper => {
+            error!("Series sweeper task exited unexpectedly: {:?}", res);
+            Err(anyhow!("series sweeper task exited"))
+        }
     };
 
     event_processor.abort();
     metrics_server.abort();
+    series_sweeper.abort();
 
     outcome
+}
+
+/// Read a duration in seconds from the environment, falling back to `default` when the
+/// variable is unset or unparseable. Clamped to at least one second: `tokio::time::interval`
+/// panics on a zero period, and a zero TTL would evict every series before it is scraped.
+fn env_seconds(name: &str, default: u64) -> u64 {
+    std::env::var(name)
+        .ok()
+        .and_then(|raw| raw.parse::<u64>().ok())
+        .unwrap_or(default)
+        .max(1)
 }
 
 /// Resolve when the process is asked to stop.
