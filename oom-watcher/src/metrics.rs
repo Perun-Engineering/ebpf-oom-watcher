@@ -1,9 +1,26 @@
-use std::sync::atomic::{AtomicU64, Ordering};
+use std::{
+    collections::HashMap,
+    sync::{
+        atomic::{AtomicU64, Ordering},
+        Mutex,
+    },
+};
 
-use oom_watcher_common::EnrichedOomEvent;
+use oom_watcher_common::{EnrichedOomEvent, OomKillEvent};
 use prometheus::{CounterVec, GaugeVec, Registry, TextEncoder};
 
 use crate::resolve::ResolutionOutcome;
+
+/// The `memory_type` label values of `oom_memory_usage_bytes`, in the order
+/// [`memory_values`] returns the figures. Recording and eviction both iterate this, so a
+/// kind cannot be added to one and forgotten in the other — [`memory_values`] returns an
+/// array of exactly this length, so adding a label here without its figure fails to build.
+const MEMORY_TYPES: [&str; 4] = ["total_vm", "anon_rss", "file_rss", "shmem_rss"];
+
+/// The memory figures of `raw`, in kilobytes, ordered to match [`MEMORY_TYPES`].
+fn memory_values(raw: &OomKillEvent) -> [u64; MEMORY_TYPES.len()] {
+    [raw.total_vm, raw.anon_rss, raw.file_rss, raw.shmem_rss]
+}
 
 /// The recording seam: how the watch loop reports what it observed, decoupled from
 /// Prometheus. The loop depends on this trait, never on the metrics backend.
@@ -21,6 +38,26 @@ pub trait MetricsRecorder {
     fn record_dropped_total(&self, node: &str, total: u64);
 }
 
+/// The label set shared by every per-container metric, so one entry tracks the lifetime
+/// of all of them at once.
+///
+/// The fields hold the labels *as recorded*, `unknown` fallbacks included — keying on the
+/// pre-fallback `Option`s would leave unresolved events unevictable.
+#[derive(Clone, PartialEq, Eq, Hash)]
+struct SeriesKey {
+    node: String,
+    namespace: String,
+    pod: String,
+    container: String,
+}
+
+impl SeriesKey {
+    /// The label values in the order the metric families declare them.
+    fn labels(&self) -> [&str; 4] {
+        [&self.node, &self.namespace, &self.pod, &self.container]
+    }
+}
+
 /// The Prometheus adapter for the [`MetricsRecorder`] seam. Owns the registry and the
 /// metric families; HTTP serving lives in [`crate::http`] so axum does not leak through
 /// this interface.
@@ -32,9 +69,18 @@ pub struct MetricsCollector {
     oom_last_timestamp: GaugeVec,
     oom_resolution_failures_total: CounterVec,
     oom_events_dropped_total: CounterVec,
+    oom_series_evicted_total: CounterVec,
     /// Last absolute drop total seen from the source, so the counter can be advanced by the
     /// delta. There is exactly one node per process, so a single slot suffices.
     last_dropped_total: AtomicU64,
+    /// When each per-container label set was last recorded, in wall-clock seconds. This is
+    /// the only record of a series' age — a Prometheus registry keeps no such thing — so
+    /// it is what [`Self::evict_stale`] sweeps.
+    ///
+    /// Poisoning is recovered from rather than propagated at both use sites: a panic
+    /// elsewhere cannot leave timestamps logically inconsistent, and taking the watcher
+    /// down over a poisoned bookkeeping map would lose real OOM events.
+    last_seen: Mutex<HashMap<SeriesKey, u64>>,
 }
 
 impl MetricsCollector {
@@ -89,6 +135,15 @@ impl MetricsCollector {
         )
         .expect("Failed to create oom_events_dropped_total metric");
 
+        let oom_series_evicted_total = CounterVec::new(
+            prometheus::Opts::new(
+                "oom_series_evicted_total",
+                "Per-container metric series deleted after going stale, bounding cardinality",
+            ),
+            &["node"],
+        )
+        .expect("Failed to create oom_series_evicted_total metric");
+
         registry
             .register(Box::new(oom_kills_total.clone()))
             .expect("Failed to register oom_kills_total");
@@ -107,6 +162,9 @@ impl MetricsCollector {
         registry
             .register(Box::new(oom_events_dropped_total.clone()))
             .expect("Failed to register oom_events_dropped_total");
+        registry
+            .register(Box::new(oom_series_evicted_total.clone()))
+            .expect("Failed to register oom_series_evicted_total");
 
         Self {
             registry,
@@ -116,7 +174,9 @@ impl MetricsCollector {
             oom_last_timestamp,
             oom_resolution_failures_total,
             oom_events_dropped_total,
+            oom_series_evicted_total,
             last_dropped_total: AtomicU64::new(0),
+            last_seen: Mutex::new(HashMap::new()),
         }
     }
 
@@ -127,6 +187,69 @@ impl MetricsCollector {
         encoder
             .encode_to_string(&metric_families)
             .unwrap_or_default()
+    }
+
+    /// Delete every per-container series whose last OOM event is at least `ttl_secs` old,
+    /// and return how many label sets were dropped.
+    ///
+    /// This is what bounds cardinality. A pod that OOM-loops mints a fresh label set on
+    /// every restart, and a Prometheus registry never expires a series on its own — without
+    /// this sweep the process' series count grows for as long as it runs.
+    ///
+    /// `ttl_secs` must comfortably exceed the scrape interval: a series deleted before it
+    /// is scraped takes its increments with it. Node-scoped families are left alone; their
+    /// cardinality is one series per process.
+    pub fn evict_stale(&self, now: u64, ttl_secs: u64) -> usize {
+        // The guard is deliberately held across the removals below. Releasing it first
+        // would let a concurrent `record_oom_event` land between the scan and the delete:
+        // it would recreate the series and stamp a fresh last-seen time, then have that
+        // series deleted underneath it — losing the increment and leaving a last-seen
+        // entry with nothing behind it until the next event. Deadlock is not possible,
+        // because `with_label_values` releases the metric's own lock before returning, so
+        // no thread ever holds one while waiting for this mutex.
+        let mut last_seen = self.last_seen.lock().unwrap_or_else(|e| e.into_inner());
+
+        let mut stale = Vec::new();
+        // `saturating_sub` absorbs a backwards wall-clock step (an NTP correction), which
+        // then reads as a fresh series and merely delays eviction by one sweep.
+        last_seen.retain(|key, &mut seen| {
+            let fresh = now.saturating_sub(seen) < ttl_secs;
+            if !fresh {
+                stale.push(key.clone());
+            }
+            fresh
+        });
+
+        for key in &stale {
+            self.remove_series(key);
+        }
+        stale.len()
+    }
+
+    /// Delete every series carrying `key`'s label set, and count the eviction.
+    ///
+    /// `remove_label_values` errors when the series is absent, which is not a failure
+    /// here — it means there was nothing left to delete.
+    fn remove_series(&self, key: &SeriesKey) {
+        let labels = key.labels();
+
+        let _ = self.oom_kills_total.remove_label_values(&labels);
+        let _ = self.oom_last_timestamp.remove_label_values(&labels);
+
+        let [node, namespace, pod, container] = labels;
+        for memory_type in MEMORY_TYPES {
+            let _ = self.oom_memory_usage_bytes.remove_label_values(&[
+                node,
+                namespace,
+                pod,
+                container,
+                memory_type,
+            ]);
+        }
+
+        self.oom_series_evicted_total
+            .with_label_values(&[node])
+            .inc();
     }
 }
 
@@ -150,39 +273,43 @@ impl MetricsRecorder for MetricsCollector {
         let pod = event.pod_name.as_deref().unwrap_or("unknown");
         let container = event.container_name.as_deref().unwrap_or("unknown");
 
-        // Increment total OOM kills
         self.oom_kills_total
             .with_label_values(&[node, namespace, pod, container])
             .inc();
 
-        // Increment per-node OOM kills
         self.oom_kills_per_node_total
             .with_label_values(&[node])
             .inc();
 
-        // Record memory usage at time of OOM
-        let labels = &[node, namespace, pod, container];
+        // Kernel figures are kilobytes; the gauge is bytes.
+        for (memory_type, kilobytes) in MEMORY_TYPES
+            .into_iter()
+            .zip(memory_values(&event.raw_event))
+        {
+            self.oom_memory_usage_bytes
+                .with_label_values(&[node, namespace, pod, container, memory_type])
+                .set((kilobytes * 1024) as f64);
+        }
 
-        self.oom_memory_usage_bytes
-            .with_label_values(&[labels[0], labels[1], labels[2], labels[3], "total_vm"])
-            .set((event.raw_event.total_vm * 1024) as f64); // Convert KB to bytes
-
-        self.oom_memory_usage_bytes
-            .with_label_values(&[labels[0], labels[1], labels[2], labels[3], "anon_rss"])
-            .set((event.raw_event.anon_rss * 1024) as f64);
-
-        self.oom_memory_usage_bytes
-            .with_label_values(&[labels[0], labels[1], labels[2], labels[3], "file_rss"])
-            .set((event.raw_event.file_rss * 1024) as f64);
-
-        self.oom_memory_usage_bytes
-            .with_label_values(&[labels[0], labels[1], labels[2], labels[3], "shmem_rss"])
-            .set((event.raw_event.shmem_rss * 1024) as f64);
-
-        // Record timestamp
         self.oom_last_timestamp
             .with_label_values(&[node, namespace, pod, container])
             .set(event.timestamp as f64);
+
+        // Touched last, so a series is only tracked once it exists. The event's own
+        // timestamp is the age reference, which keeps eviction on the clock injected into
+        // the watch loop rather than on a second, independent read of the wall clock.
+        self.last_seen
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .insert(
+                SeriesKey {
+                    node: node.to_string(),
+                    namespace: namespace.to_string(),
+                    pod: pod.to_string(),
+                    container: container.to_string(),
+                },
+                event.timestamp,
+            );
     }
 
     /// Advance the counter by the delta since the last reading. `checked_sub` guards the
@@ -256,6 +383,175 @@ mod tests {
         assert!(collector
             .get_metrics()
             .contains("oom_events_dropped_total{node=\"node-1\"} 7"));
+    }
+
+    /// An enriched event for `pod` at `timestamp`, resolved to a container identity.
+    fn event_at(pod: &str, timestamp: u64) -> EnrichedOomEvent {
+        EnrichedOomEvent {
+            raw_event: oom_watcher_common::OomKillEvent {
+                pid: 1234,
+                comm: *b"python\0\0\0\0\0\0\0\0\0\0",
+                total_vm: 100,
+                anon_rss: 50,
+                file_rss: 20,
+                shmem_rss: 5,
+                uid: 1000,
+                pgtables: 8,
+                oom_score_adj: 0,
+            },
+            node_name: Some("node-1".into()),
+            namespace: Some("prod".into()),
+            pod_name: Some(pod.into()),
+            container_name: Some("api".into()),
+            container_id: Some("abc123".into()),
+            timestamp,
+        }
+    }
+
+    const T0: u64 = 1_717_000_000;
+    const TTL: u64 = 1_800;
+
+    #[test]
+    fn evicts_a_series_untouched_for_at_least_the_ttl() {
+        let collector = MetricsCollector::new();
+        collector.record_oom_event(&event_at("api-7d9", T0));
+
+        assert_eq!(collector.evict_stale(T0 + TTL, TTL), 1);
+
+        assert!(!collector.get_metrics().contains("api-7d9"));
+    }
+
+    #[test]
+    fn keeps_a_series_touched_within_the_ttl() {
+        let collector = MetricsCollector::new();
+        collector.record_oom_event(&event_at("api-7d9", T0));
+
+        // One second short of the TTL is still fresh — the boundary is inclusive.
+        assert_eq!(collector.evict_stale(T0 + TTL - 1, TTL), 0);
+
+        assert!(collector
+            .get_metrics()
+            .contains("oom_kills_total{container=\"api\",namespace=\"prod\",node=\"node-1\",pod=\"api-7d9\"} 1"));
+    }
+
+    #[test]
+    fn evicts_only_the_stale_series_and_leaves_fresh_ones() {
+        let collector = MetricsCollector::new();
+        collector.record_oom_event(&event_at("crashloop-1", T0));
+        collector.record_oom_event(&event_at("steady-1", T0 + TTL));
+
+        assert_eq!(collector.evict_stale(T0 + TTL, TTL), 1);
+
+        let out = collector.get_metrics();
+        assert!(!out.contains("crashloop-1"));
+        assert!(out.contains("steady-1"));
+    }
+
+    #[test]
+    fn evicting_removes_every_memory_type_gauge() {
+        let collector = MetricsCollector::new();
+        collector.record_oom_event(&event_at("api-7d9", T0));
+        assert_eq!(
+            collector
+                .get_metrics()
+                .matches("oom_memory_usage_bytes{")
+                .count(),
+            MEMORY_TYPES.len()
+        );
+
+        collector.evict_stale(T0 + TTL, TTL);
+
+        assert!(!collector.get_metrics().contains("oom_memory_usage_bytes{"));
+    }
+
+    #[test]
+    fn a_later_touch_extends_the_lifetime_of_a_series() {
+        let collector = MetricsCollector::new();
+        collector.record_oom_event(&event_at("api-7d9", T0));
+        collector.record_oom_event(&event_at("api-7d9", T0 + TTL));
+
+        // Age is measured from the most recent event, not the first.
+        assert_eq!(collector.evict_stale(T0 + TTL, TTL), 0);
+    }
+
+    #[test]
+    fn forgets_the_evicted_key_so_a_second_sweep_is_a_no_op() {
+        let collector = MetricsCollector::new();
+        collector.record_oom_event(&event_at("api-7d9", T0));
+
+        collector.evict_stale(T0 + TTL, TTL);
+
+        assert_eq!(collector.evict_stale(T0 + 2 * TTL, TTL), 0);
+    }
+
+    #[test]
+    fn a_series_recreated_after_eviction_starts_from_zero() {
+        let collector = MetricsCollector::new();
+        collector.record_oom_event(&event_at("api-7d9", T0));
+        collector.record_oom_event(&event_at("api-7d9", T0));
+        collector.evict_stale(T0 + TTL, TTL);
+
+        collector.record_oom_event(&event_at("api-7d9", T0 + 2 * TTL));
+
+        // A counter reset is the correct reading: it is a different container.
+        assert!(collector
+            .get_metrics()
+            .contains("oom_kills_total{container=\"api\",namespace=\"prod\",node=\"node-1\",pod=\"api-7d9\"} 1"));
+    }
+
+    #[test]
+    fn counts_evictions_per_node() {
+        let collector = MetricsCollector::new();
+        collector.record_oom_event(&event_at("api-7d9", T0));
+        collector.record_oom_event(&event_at("api-8f2", T0));
+
+        collector.evict_stale(T0 + TTL, TTL);
+
+        assert!(collector
+            .get_metrics()
+            .contains("oom_series_evicted_total{node=\"node-1\"} 2"));
+    }
+
+    #[test]
+    fn does_not_emit_an_eviction_series_until_something_is_evicted() {
+        let collector = MetricsCollector::new();
+        collector.record_oom_event(&event_at("api-7d9", T0));
+
+        collector.evict_stale(T0, TTL);
+
+        assert!(!collector
+            .get_metrics()
+            .contains("oom_series_evicted_total{"));
+    }
+
+    #[test]
+    fn leaves_node_scoped_series_alone() {
+        let collector = MetricsCollector::new();
+        collector.record_oom_event(&event_at("api-7d9", T0));
+
+        collector.evict_stale(T0 + TTL, TTL);
+
+        // Cardinality here is one series per process — there is nothing to bound.
+        assert!(collector
+            .get_metrics()
+            .contains("oom_kills_per_node_total{node=\"node-1\"} 1"));
+    }
+
+    #[test]
+    fn evicts_the_unknown_label_set_of_an_unresolved_event() {
+        let collector = MetricsCollector::new();
+        let mut event = event_at("api-7d9", T0);
+        event.node_name = None;
+        event.namespace = None;
+        event.pod_name = None;
+        event.container_name = None;
+        collector.record_oom_event(&event);
+        assert!(collector.get_metrics().contains("pod=\"unknown\""));
+
+        // The key must be the labels as recorded, fallbacks included, or these leak.
+        assert_eq!(collector.evict_stale(T0 + TTL, TTL), 1);
+
+        assert!(!collector.get_metrics().contains("pod=\"unknown\""));
     }
 
     #[test]

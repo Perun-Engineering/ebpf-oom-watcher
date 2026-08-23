@@ -51,6 +51,21 @@ The OOM Watcher exposes the following Prometheus metrics on port 8080:
 - `oom_last_timestamp{node, namespace, pod, container}` - Timestamp of last OOM event
 - `oom_resolution_failures_total{node, reason}` - OOM events whose PID could not be resolved to a container (`reason` is `not_found` or `error`)
 - `oom_events_dropped_total{node}` - OOM events the probe could not enqueue because the ring buffer was full
+- `oom_series_evicted_total{node}` - Per-container series deleted after going stale (see [Series eviction](#series-eviction))
+
+### Series eviction
+
+`oom_kills_total`, `oom_memory_usage_bytes` and `oom_last_timestamp` are keyed on pod name,
+so an OOM-looping pod mints a new series on every restart. Nothing in a Prometheus client library expires a series, so
+the watcher sweeps them itself: a label set with no OOM event for `SERIES_TTL_SECONDS`
+(default 30 min) is deleted, and `oom_series_evicted_total` counts the deletions. Node-scoped
+metrics are never evicted — there is one of each per process.
+
+The TTL must stay comfortably above your scrape interval. A series deleted before it is
+scraped takes its increments with it, unread.
+
+An evicted series that reappears restarts from zero. That is the correct reading for
+`rate()`: it *is* a different container.
 
 ### Example Queries
 
@@ -72,6 +87,8 @@ oom_memory_usage_bytes{memory_type="anon_rss"}
 - `NODE_NAME`: Kubernetes node name (automatically set by DaemonSet)
 - `METRICS_PORT`: Port for Prometheus metrics (default: 8080)
 - `RUST_LOG`: Log level (default: info)
+- `SERIES_TTL_SECONDS`: How long a per-container series survives its last OOM event (default: 1800). Must exceed the scrape interval
+- `SERIES_SWEEP_INTERVAL_SECONDS`: How often stale series are swept (default: 300)
 
 ### Helm Chart Values
 
