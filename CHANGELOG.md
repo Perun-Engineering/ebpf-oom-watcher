@@ -1,3 +1,10 @@
+# [0.4.0](https://github.com/Perun-Engineering/ebpf-oom-watcher/compare/v0.3.0...v0.4.0) (2026-08-23)
+
+
+### Features
+
+* **k8s:** serve pod lookups from a node-scoped reflector cache ([#77](https://github.com/Perun-Engineering/ebpf-oom-watcher/issues/77)) ([0edca68](https://github.com/Perun-Engineering/ebpf-oom-watcher/commit/0edca68e8930bb3edfebee380a8dc11d2cf89290))
+
 # [0.3.0](https://github.com/Perun-Engineering/ebpf-oom-watcher/compare/v0.2.0...v0.3.0) (2026-08-23)
 
 
