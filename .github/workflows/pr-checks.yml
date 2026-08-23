@@ -131,6 +131,67 @@ jobs:
         env:
           CARGO_TARGET_BPFEL_UNKNOWN_NONE_LINKER: bpf-linker
 
+  image:
+    name: Image Build (eBPF)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@v4.2.0
+
+      # The only job that links the eBPF probe and produces the artifact that actually
+      # ships. `build` above passes --no-default-features, so nothing else on this workflow
+      # would notice bpf-linker breaking, an eBPF compile error, or a broken Dockerfile
+      # until the release pipeline ran. Reads the release job's cache so it usually starts
+      # warm; writes its own scope so a PR can never poison what release restores from.
+      - name: Build the runtime image
+        uses: docker/build-push-action@v7.3.0
+        with:
+          context: .
+          file: ./Dockerfile
+          target: runtime
+          platforms: linux/amd64
+          push: false
+          cache-from: |
+            type=gha,scope=linux/amd64
+            type=gha,scope=pr-linux/amd64
+          cache-to: type=gha,mode=min,scope=pr-linux/amd64
+
+  manifests:
+    name: Manifests
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+
+      - name: Set up Helm
+        uses: azure/setup-helm@v5.0.1
+        with:
+          version: 3.13.0
+
+      - name: Install kubeconform
+        run: |
+          curl -sSL https://github.com/yannh/kubeconform/releases/download/v0.6.7/kubeconform-linux-amd64.tar.gz \
+            | tar -xz kubeconform
+          sudo install -m 0755 kubeconform /usr/local/bin/kubeconform
+
+      - name: Lint the chart
+        run: helm lint helm/oom-watcher
+
+      # Both hostNetwork states: only one of them renders dnsPolicy, so a template that is
+      # valid by default can still be broken when it is switched on.
+      - name: Validate the rendered chart
+        run: |
+          helm template oom-watcher helm/oom-watcher | kubeconform -strict -summary
+          helm template oom-watcher helm/oom-watcher --set hostNetwork=true \
+            | kubeconform -strict -summary
+
+      - name: Validate the raw manifests
+        run: |
+          kubeconform -strict -summary k8s/daemonset.yaml
+          # ServiceMonitor is a CRD, so its schema is not in the upstream bundle.
+          kubeconform -strict -summary -ignore-missing-schemas k8s/servicemonitor.yaml
+
   audit:
     name: Security Audit
     runs-on: ubuntu-latest
