@@ -12,14 +12,15 @@ pub fn enrich(
     identity: Option<ContainerIdentity>,
     timestamp: u64,
 ) -> EnrichedOomEvent {
-    let (namespace, pod_name, container_name, container_id) = match identity {
+    let (namespace, pod_name, container_name, container_id, image_id) = match identity {
         Some(id) => (
             Some(id.namespace),
             Some(id.pod_name),
             Some(id.container_name),
             Some(id.container_id),
+            Some(id.image_id),
         ),
-        None => (None, None, None, None),
+        None => (None, None, None, None, None),
     };
 
     EnrichedOomEvent {
@@ -29,6 +30,7 @@ pub fn enrich(
         pod_name,
         container_name,
         container_id,
+        image_id,
         timestamp,
     }
 }
@@ -56,7 +58,8 @@ mod tests {
             namespace: "prod".into(),
             pod_name: "api-7d9".into(),
             container_name: "api".into(),
-            container_id: "abc123".into(),
+            container_id: "containerd://abc123".into(),
+            image_id: "repo@sha256:def456".into(),
         }
     }
 
@@ -67,7 +70,8 @@ mod tests {
         assert_eq!(e.namespace.as_deref(), Some("prod"));
         assert_eq!(e.pod_name.as_deref(), Some("api-7d9"));
         assert_eq!(e.container_name.as_deref(), Some("api"));
-        assert_eq!(e.container_id.as_deref(), Some("abc123"));
+        assert_eq!(e.container_id.as_deref(), Some("containerd://abc123"));
+        assert_eq!(e.image_id.as_deref(), Some("repo@sha256:def456"));
     }
 
     #[test]
@@ -80,6 +84,7 @@ mod tests {
         assert_eq!(e.pod_name, None);
         assert_eq!(e.container_name, None);
         assert_eq!(e.container_id, None);
+        assert_eq!(e.image_id, None);
     }
 
     #[test]
@@ -90,6 +95,7 @@ mod tests {
         assert_eq!(e.pod_name, None);
         assert_eq!(e.container_name, None);
         assert_eq!(e.container_id, None);
+        assert_eq!(e.image_id, None);
     }
 
     #[test]

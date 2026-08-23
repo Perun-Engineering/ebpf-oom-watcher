@@ -5,6 +5,24 @@ use prometheus::{CounterVec, GaugeVec, Registry, TextEncoder};
 
 use crate::resolve::ResolutionOutcome;
 
+/// The labels identifying the container a kill is attributed to. Carried by both metrics
+/// keyed on it — `oom_kills_total` and `oom_last_timestamp` — and kept identical so the
+/// two join to each other directly rather than on a subset.
+///
+/// `container_id` is the kubelet's runtime-prefixed form and `image_id` the digest it
+/// resolved, which is what makes this joinable to `kube_pod_container_info` on a key more
+/// stable than pod name — a restarted pod in a Deployment gets a new name, but the ids
+/// still describe the thing that was killed. `image_id` is functionally determined by
+/// `container_id`, so it annotates these series without multiplying them.
+const PER_CONTAINER_LABELS: &[&str] = &[
+    "node",
+    "namespace",
+    "pod",
+    "container",
+    "container_id",
+    "image_id",
+];
+
 /// The recording seam: how the watch loop reports what it observed, decoupled from
 /// Prometheus. The loop depends on this trait, never on the metrics backend.
 ///
@@ -43,7 +61,7 @@ impl MetricsCollector {
 
         let oom_kills_total = CounterVec::new(
             prometheus::Opts::new("oom_kills_total", "Total number of OOM kills observed"),
-            &["node", "namespace", "pod", "container"],
+            PER_CONTAINER_LABELS,
         )
         .expect("Failed to create oom_kills_total metric");
 
@@ -67,7 +85,7 @@ impl MetricsCollector {
 
         let oom_last_timestamp = GaugeVec::new(
             prometheus::Opts::new("oom_last_timestamp", "Timestamp of the last OOM kill event"),
-            &["node", "namespace", "pod", "container"],
+            PER_CONTAINER_LABELS,
         )
         .expect("Failed to create oom_last_timestamp metric");
 
@@ -149,11 +167,12 @@ impl MetricsRecorder for MetricsCollector {
         let namespace = event.namespace.as_deref().unwrap_or("unknown");
         let pod = event.pod_name.as_deref().unwrap_or("unknown");
         let container = event.container_name.as_deref().unwrap_or("unknown");
+        let container_id = event.container_id.as_deref().unwrap_or("unknown");
+        let image_id = event.image_id.as_deref().unwrap_or("unknown");
+        let per_container = &[node, namespace, pod, container, container_id, image_id];
 
         // Increment total OOM kills
-        self.oom_kills_total
-            .with_label_values(&[node, namespace, pod, container])
-            .inc();
+        self.oom_kills_total.with_label_values(per_container).inc();
 
         // Increment per-node OOM kills
         self.oom_kills_per_node_total
@@ -181,7 +200,7 @@ impl MetricsRecorder for MetricsCollector {
 
         // Record timestamp
         self.oom_last_timestamp
-            .with_label_values(&[node, namespace, pod, container])
+            .with_label_values(per_container)
             .set(event.timestamp as f64);
     }
 
@@ -220,7 +239,8 @@ mod tests {
                 namespace: "p".into(),
                 pod_name: "po".into(),
                 container_name: "c".into(),
-                container_id: "id".into(),
+                container_id: "containerd://id".into(),
+                image_id: "repo@sha256:d".into(),
             }),
         );
 
@@ -256,6 +276,108 @@ mod tests {
         assert!(collector
             .get_metrics()
             .contains("oom_events_dropped_total{node=\"node-1\"} 7"));
+    }
+
+    /// A fully resolved event, as the watch loop hands it to the recorder.
+    fn resolved_event() -> EnrichedOomEvent {
+        EnrichedOomEvent {
+            raw_event: oom_watcher_common::OomKillEvent {
+                pid: 1234,
+                comm: *b"python\0\0\0\0\0\0\0\0\0\0",
+                total_vm: 100,
+                anon_rss: 50,
+                file_rss: 20,
+                shmem_rss: 5,
+                uid: 1000,
+                pgtables: 8,
+                oom_score_adj: 0,
+            },
+            node_name: Some("node-1".into()),
+            namespace: Some("prod".into()),
+            pod_name: Some("api-7d9".into()),
+            container_name: Some("api".into()),
+            container_id: Some("containerd://abc123".into()),
+            image_id: Some("repo@sha256:def456".into()),
+            timestamp: 1_717_000_000,
+        }
+    }
+
+    /// Labels as Prometheus renders them: sorted, so container_id and image_id land
+    /// between `container` and `namespace`.
+    const RESOLVED_LABELS: &str = concat!(
+        r#"{container="api",container_id="containerd://abc123","#,
+        r#"image_id="repo@sha256:def456",namespace="prod",node="node-1",pod="api-7d9"}"#
+    );
+
+    #[test]
+    fn labels_oom_kills_total_with_the_container_and_image_ids() {
+        let collector = MetricsCollector::new();
+
+        collector.record_oom_event(&resolved_event());
+
+        assert!(collector
+            .get_metrics()
+            .contains(&format!("oom_kills_total{RESOLVED_LABELS} 1")));
+    }
+
+    #[test]
+    fn labels_oom_last_timestamp_with_the_container_and_image_ids() {
+        // The two per-incident metrics carry the same label set, so they join to each
+        // other without a `group_left` on a subset.
+        let collector = MetricsCollector::new();
+
+        collector.record_oom_event(&resolved_event());
+
+        assert!(collector
+            .get_metrics()
+            .contains(&format!("oom_last_timestamp{RESOLVED_LABELS}")));
+    }
+
+    #[test]
+    fn leaves_the_memory_gauge_label_set_unchanged() {
+        // Already five labels, and memory at kill time is a property of the container, not
+        // of the image — the ids would multiply series here for no query anyone runs.
+        let collector = MetricsCollector::new();
+
+        collector.record_oom_event(&resolved_event());
+
+        let out = collector.get_metrics();
+        assert!(out.contains(
+            r#"oom_memory_usage_bytes{container="api",memory_type="anon_rss",namespace="prod",node="node-1",pod="api-7d9"}"#
+        ));
+        assert!(!out
+            .lines()
+            .any(|l| l.starts_with("oom_memory_usage_bytes") && l.contains("container_id=")));
+    }
+
+    #[test]
+    fn falls_back_to_unknown_for_both_ids_when_resolution_failed() {
+        let collector = MetricsCollector::new();
+        let mut event = resolved_event();
+        event.namespace = None;
+        event.pod_name = None;
+        event.container_name = None;
+        event.container_id = None;
+        event.image_id = None;
+
+        collector.record_oom_event(&event);
+
+        assert!(collector.get_metrics().contains(concat!(
+            r#"oom_kills_total{container="unknown",container_id="unknown","#,
+            r#"image_id="unknown",namespace="unknown",node="node-1",pod="unknown"} 1"#
+        )));
+    }
+
+    #[test]
+    fn keeps_the_per_node_counter_free_of_container_labels() {
+        // One series per node is the point of this metric; it must not gain a dimension.
+        let collector = MetricsCollector::new();
+
+        collector.record_oom_event(&resolved_event());
+
+        assert!(collector
+            .get_metrics()
+            .contains(r#"oom_kills_per_node_total{node="node-1"} 1"#));
     }
 
     #[test]

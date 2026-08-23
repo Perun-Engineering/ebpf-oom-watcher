@@ -45,12 +45,33 @@ sudo ./target/release/oom-watcher
 
 The OOM Watcher exposes the following Prometheus metrics on port 8080:
 
-- `oom_kills_total{node, namespace, pod, container}` - Total number of OOM kills
+- `oom_kills_total{node, namespace, pod, container, container_id, image_id}` - Total number of OOM kills
 - `oom_kills_per_node_total{node}` - Total OOM kills per node
 - `oom_memory_usage_bytes{node, namespace, pod, container, memory_type}` - Memory usage at OOM time
-- `oom_last_timestamp{node, namespace, pod, container}` - Timestamp of last OOM event
+- `oom_last_timestamp{node, namespace, pod, container, container_id, image_id}` - Timestamp of last OOM event
 - `oom_resolution_failures_total{node, reason}` - OOM events whose PID could not be resolved to a container (`reason` is `not_found` or `error`)
 - `oom_events_dropped_total{node}` - OOM events the probe could not enqueue because the ring buffer was full
+
+The container labels — `namespace`, `pod`, `container`, `container_id`, `image_id` —
+fall back to `unknown` when the PID could not be resolved to a container. `node` does
+not: a failed resolution never erases the node we already know we are running on, so
+it reads `unknown` only outside a cluster.
+
+### Joining to the rest of the Kubernetes metrics
+
+`container_id` and `image_id` are emitted exactly as the kubelet reports them —
+`containerd://<id>` (or `docker://`, `cri-o://`) and the runtime-resolved image digest.
+That is the same form `kube_pod_container_info` carries, so the two join directly on a key
+that survives a restart, unlike pod name:
+
+```promql
+oom_kills_total * on (container_id) group_left (image, image_spec)
+  kube_pod_container_info
+```
+
+`image_id` is empty for a container that never started, and does not multiply series: it is
+functionally determined by `container_id`, so it annotates the series rather than splitting
+them.
 
 ### Example Queries
 
@@ -60,6 +81,9 @@ rate(oom_kills_total[5m])
 
 # OOM kills by namespace
 sum by (namespace) (oom_kills_total)
+
+# Did the new build start OOMing?
+sum by (image_id) (increase(oom_kills_total{namespace="prod"}[24h]))
 
 # Memory usage at OOM by type
 oom_memory_usage_bytes{memory_type="anon_rss"}
