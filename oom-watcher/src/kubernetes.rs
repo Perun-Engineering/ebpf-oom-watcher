@@ -2,7 +2,7 @@ use std::{fs, io, sync::LazyLock, time::Duration};
 
 use anyhow::{anyhow, Context, Result};
 use futures::{FutureExt, StreamExt};
-use k8s_openapi::api::core::v1::Pod;
+use k8s_openapi::api::core::v1::{ContainerStatus, Pod};
 use kube::{
     runtime::{reflector, watcher, WatchStreamExt},
     Api, Client, Config,
@@ -73,15 +73,58 @@ fn identity_from_pods<'a>(
     pods: impl IntoIterator<Item = &'a Pod>,
     container_id: &str,
 ) -> Option<ContainerIdentity> {
-    pods.into_iter().find_map(|pod| {
+    let pods: Vec<&Pod> = pods.into_iter().collect();
+
+    // The running container first. If the kubelet has not replaced it yet — the usual
+    // case — this is the container that died, and its id is the one
+    // `kube_pod_container_info` currently carries.
+    match_container(&pods, container_id, running_container_id).or_else(|| {
+        // Otherwise the kubelet got there first: the container has already been restarted
+        // and the dead one's id has moved into `lastState.terminated`. Without this pass
+        // the event resolves to `unknown` purely because we lost a race we were always
+        // going to be in — the kernel sends SIGKILL before firing `oom:mark_victim`.
+        match_container(&pods, container_id, terminated_container_id)
+    })
+}
+
+/// The id of the container running now, as the kubelet reports it.
+fn running_container_id(status: &ContainerStatus) -> Option<&str> {
+    status.container_id.as_deref()
+}
+
+/// The id of the container this one replaced, if it replaced one.
+fn terminated_container_id(status: &ContainerStatus) -> Option<&str> {
+    status
+        .last_state
+        .as_ref()?
+        .terminated
+        .as_ref()?
+        .container_id
+        .as_deref()
+}
+
+/// Whether a kubelet-reported id names the bare 64-hex id lifted from the cgroup. Both
+/// passes share this: `lastState.terminated.containerId` carries the same
+/// `containerd://<id>` form as the live one.
+fn names_container(reported: &str, container_id: &str) -> bool {
+    reported.ends_with(container_id) || reported.contains(container_id)
+}
+
+/// Find the container `container_id` names, taking each status' candidate id from
+/// `candidate`, and build its identity.
+fn match_container(
+    pods: &[&Pod],
+    container_id: &str,
+    candidate: fn(&ContainerStatus) -> Option<&str>,
+) -> Option<ContainerIdentity> {
+    pods.iter().find_map(|pod| {
         // `?` here exits this closure, not the function — a pod without statuses is
         // skipped and the search continues with the next one.
         let statuses = pod.status.as_ref()?.container_statuses.as_ref()?;
 
         let (status, container_id_full) = statuses.iter().find_map(|status| {
-            let full = status.container_id.as_deref()?;
-            // Container ID format: docker://abc123... or containerd://abc123...
-            (full.ends_with(container_id) || full.contains(container_id)).then_some((status, full))
+            let full = candidate(status)?;
+            names_container(full, container_id).then_some((status, full))
         })?;
 
         Some(ContainerIdentity {
@@ -99,6 +142,13 @@ fn identity_from_pods<'a>(
             // Both ids are taken as the kubelet reported them, never reconstructed: these
             // are the strings `kube_pod_container_info` carries, so emitting them verbatim
             // is what makes the join work.
+            //
+            // On the `lastState` pass this is the *dead* container's id, which is right —
+            // the series describes that instance, not its replacement. It stops joining
+            // `kube_pod_container_info` the moment the kubelet advances, but that is
+            // already true of every past restart and is not something this pass changes.
+            // `image_id` has no per-state equivalent, so it is the status' current image;
+            // a restart in place almost always reuses it.
             container_id: container_id_full.to_string(),
             image_id: status.image_id.clone(),
         })
@@ -138,7 +188,16 @@ impl PodCache {
     ///
     /// Returns the cache and the task driving the watch; the caller must keep that task
     /// alive and supervise it, because a cache nobody is feeding goes stale in silence.
-    fn spawn(pods_api: Api<Pod>, node_name: &str) -> (Self, JoinHandle<()>) {
+    ///
+    /// `on_pod_deleted` is called with `(namespace, pod)` for every pod the API server
+    /// removes. Injected as a closure rather than handed a recorder, so this module keeps
+    /// knowing nothing about Prometheus — the same shape as the clock and the liveness
+    /// heartbeat the watch loop takes.
+    fn spawn(
+        pods_api: Api<Pod>,
+        node_name: &str,
+        on_pod_deleted: impl Fn(&str, &str) + Send + 'static,
+    ) -> (Self, JoinHandle<()>) {
         // The same field selector the per-event list used: this node's pods, not the
         // cluster's. It also bounds what the cache costs — one node's worth of pods.
         let config = watcher::Config::default().fields(&format!("spec.nodeName={}", node_name));
@@ -169,6 +228,20 @@ impl PodCache {
                         // has a single waker slot to displace.
                         Ok(watcher::Event::InitDone) => {
                             info!("Pod cache synced: {} pods on node {}", synced.len(), node)
+                        }
+                        // A pod that is gone can never be killed again, so its series have
+                        // nothing left to accumulate and need not wait out the eviction
+                        // TTL. Note that a *restart* does not arrive here — a crashlooping
+                        // container keeps its pod object — so the case series eviction was
+                        // built around is untouched.
+                        Ok(watcher::Event::Delete(pod)) => {
+                            if let (Some(namespace), Some(name)) = (
+                                pod.metadata.namespace.as_deref(),
+                                pod.metadata.name.as_deref(),
+                            ) {
+                                debug!("Pod {}/{} deleted; scheduling its series", namespace, name);
+                                on_pod_deleted(namespace, name);
+                            }
                         }
                         Ok(_) => {}
                         Err(e) => warn!("Pod cache watch error (retrying): {}", e),
@@ -251,10 +324,12 @@ impl KubernetesClient {
     /// Connect to the API server and start the pod cache.
     ///
     /// Returns the client and the task feeding its cache. Startup deliberately does *not*
-    /// block on the initial list: `/metrics` doubles as the liveness probe, so a slow API
-    /// server must not delay the HTTP bind. Until the list lands, lookups report an error
-    /// rather than a wrong answer.
-    pub async fn new() -> Result<(Self, JoinHandle<()>)> {
+    /// block on the initial list: a slow API server must not delay the HTTP bind, which is
+    /// what serves both probes. Until the list lands, lookups report an error rather than a
+    /// wrong answer.
+    pub async fn new(
+        on_pod_deleted: impl Fn(&str, &str) + Send + 'static,
+    ) -> Result<(Self, JoinHandle<()>)> {
         let config = Config::incluster()
             .map_err(|e| anyhow!("Failed to create in-cluster config: {}", e))?;
 
@@ -268,7 +343,7 @@ impl KubernetesClient {
             anyhow!("NODE_NAME is unset; the DaemonSet must expose it via the downward API")
         })?;
 
-        let (pods, cache_task) = PodCache::spawn(pods_api, &node_name);
+        let (pods, cache_task) = PodCache::spawn(pods_api, &node_name, on_pod_deleted);
 
         Ok((Self { pods, node_name }, cache_task))
     }
@@ -350,7 +425,9 @@ impl ContainerResolver for KubernetesClient {
 #[cfg(test)]
 mod tests {
     use k8s_openapi::{
-        api::core::v1::{ContainerStatus, PodSpec, PodStatus},
+        api::core::v1::{
+            ContainerState, ContainerStateTerminated, ContainerStatus, PodSpec, PodStatus,
+        },
         apimachinery::pkg::apis::meta::v1::{ManagedFieldsEntry, ObjectMeta},
     };
     use kube::runtime::reflector::store::Writer;
@@ -428,6 +505,25 @@ mod tests {
             container_id: Some(container_id.to_string()),
             image_id: image_id.to_string(),
             ..Default::default()
+        }
+    }
+
+    /// A container the kubelet has already restarted: `container_id` is the replacement
+    /// now running, `terminated_container_id` the instance that died.
+    fn restarted_container_status(
+        name: &str,
+        container_id: &str,
+        terminated_container_id: &str,
+    ) -> ContainerStatus {
+        ContainerStatus {
+            last_state: Some(ContainerState {
+                terminated: Some(ContainerStateTerminated {
+                    container_id: Some(terminated_container_id.to_string()),
+                    ..Default::default()
+                }),
+                ..Default::default()
+            }),
+            ..container_status(name, container_id, "repo@sha256:abc")
         }
     }
 
@@ -515,6 +611,70 @@ mod tests {
 
         assert_eq!(identity.container_name, "api");
         assert_eq!(identity.image_id, "api@sha256:2");
+    }
+
+    /// The race we are always in: the kernel sends SIGKILL before firing `oom:mark_victim`,
+    /// so by the time the cgroup is read the kubelet may already have replaced the
+    /// container. The id from `/proc` then names nothing in `containerStatuses` unless the
+    /// terminated state is consulted.
+    #[test]
+    fn resolves_a_container_the_kubelet_has_already_replaced() {
+        let pods = [pod_with_statuses(vec![restarted_container_status(
+            "api",
+            "containerd://replacement",
+            &format!("containerd://{ID}"),
+        )])];
+
+        let identity = identity_from_pods(pods.iter(), ID).expect("resolved from lastState");
+
+        assert_eq!(identity.namespace, "prod");
+        assert_eq!(identity.pod_name, "api-7d9");
+        assert_eq!(identity.container_name, "api");
+    }
+
+    /// The series describes the instance that died, so it carries that instance's id — not
+    /// the one that took its place.
+    #[test]
+    fn carries_the_dead_containers_id_not_its_replacement() {
+        let dead = format!("containerd://{ID}");
+        let pods = [pod_with_statuses(vec![restarted_container_status(
+            "api",
+            "containerd://replacement",
+            &dead,
+        )])];
+
+        let identity = identity_from_pods(pods.iter(), ID).expect("resolved from lastState");
+
+        assert_eq!(identity.container_id, dead);
+    }
+
+    /// A running container that matches wins outright: the terminated pass exists only for
+    /// ids nothing live accounts for.
+    #[test]
+    fn prefers_a_running_container_over_a_terminated_one() {
+        let running = pod_with(&format!("containerd://{ID}"), "repo@sha256:abc");
+        let restarted = pod_with_statuses(vec![restarted_container_status(
+            "stale",
+            "containerd://replacement",
+            &format!("containerd://{ID}"),
+        )]);
+
+        // The terminated match is offered first, so ordering cannot be what decides it.
+        let identity = identity_from_pods([&restarted, &running], ID).expect("resolved");
+
+        assert_eq!(identity.container_name, "api");
+        assert_eq!(identity.container_id, format!("containerd://{ID}"));
+    }
+
+    #[test]
+    fn finds_nothing_when_neither_the_running_nor_the_terminated_container_matches() {
+        let pods = [pod_with_statuses(vec![restarted_container_status(
+            "api",
+            "containerd://replacement",
+            "containerd://someone-else",
+        )])];
+
+        assert!(identity_from_pods(pods.iter(), ID).is_none());
     }
 
     #[test]

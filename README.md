@@ -79,6 +79,13 @@ the watcher sweeps them itself: a label set with no OOM event for `SERIES_TTL_SE
 (default 30 min) is deleted, and `oom_series_evicted_total` counts the deletions. Node-scoped
 metrics are never evicted — there is one of each per process.
 
+The TTL is the backstop, not the only trigger. When the API server deletes a pod, the
+watcher sees it on the same watch that feeds container resolution and sweeps that pod's
+series about two minutes later — a deleted pod can never be killed again, so there is
+nothing left for its series to accumulate. The delay is deliberate: a series removed before
+it is scraped takes its increments with it. A container *restart* is not a deletion, so a
+crashlooping pod is unaffected.
+
 Because `oom_kills_total` and `oom_last_timestamp` also carry `container_id`, a crashlooping
 pod produces one tracked series per *restart*, each expiring on its own schedule.
 `oom_memory_usage_bytes` carries no id, so every restart of the same container writes to one

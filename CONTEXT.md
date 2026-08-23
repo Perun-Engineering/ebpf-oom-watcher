@@ -20,6 +20,15 @@ use these terms exactly.
   construction. There is no partially-filled identity: a container that cannot be matched
   yields `None` and is counted as a resolution failure.
 
+  Matching runs in two passes: the running container first, then
+  `lastState.terminated.containerId`. The second exists because the kernel sends SIGKILL
+  *before* firing `oom:mark_victim`, so the kubelet may already have replaced the container
+  by the time its cgroup is read — without it that event resolves to `unknown` purely for
+  having lost a race it was always in. The identity then carries the *dead* container's id,
+  since the series describes that instance; it stops joining `kube_pod_container_info` once
+  the kubelet advances, which is already true of every past restart. Running always wins, so
+  an id that somehow matches both cannot be decided by pod ordering.
+
 - **Enrichment** — the step that takes a raw **OOM kill event** and a (possibly absent)
   **container identity** and produces an **enriched OOM event**. The single rule it
   encodes: `node_name` is known *iff* this process has a **container resolver** (i.e. we
@@ -64,7 +73,9 @@ use these terms exactly.
   two users of the readiness latch and never overlap, which is why the sync is logged from
   the event stream (on `InitDone`) rather than from a third waiter — `wait_until_ready` is a
   `oneshot` with one waker slot. `main` supervises the task feeding the cache, since a cache
-  nobody feeds goes stale in silence.
+  nobody feeds goes stale in silence. The cache also reports pod *deletions* — through an injected closure, so this
+  module stays free of Prometheus — which is what lets **series eviction** follow pod
+  lifecycle rather than only a timer.
 
 - **Container resolver** (`ContainerResolver`) — the seam for **resolution**. A trait
   exposing `node_name()` and `async resolve(pid) -> ResolutionOutcome`. `KubernetesClient`
@@ -152,3 +163,14 @@ use these terms exactly.
   the Prometheus adapter, not something the **watch loop** reports. `main` drives it from a
   dedicated task, because series go stale exactly when events stop and the loop is then
   parked on epoll.
+
+  The TTL is the backstop, not the only trigger. A pod the API server deletes can never be
+  killed again, so the **pod cache** reports it and its series are swept on the pod's
+  schedule instead — cardinality tracks pod lifecycle, and the timer only covers series
+  nothing has told us about. Deletion *schedules* rather than deletes: the entry carries a
+  due time a grace period out, because the same rule still binds — a series removed before
+  it is scraped takes its increments with it, and a Job pod that OOMs and is deleted seconds
+  later is exactly that case. Removal still runs through the sweep, so the
+  `oom_memory_usage_bytes` orphan gate, the lock discipline and `oom_series_evicted_total`
+  are not reimplemented on a second path. A container *restart* never reaches this: a
+  crashlooping pod keeps its pod object, so the case this was built around is untouched.
