@@ -4,7 +4,7 @@
 //! the kernel's tracepoint layout, bumping the memlock rlimit, loading the probe, attaching
 //! it to `oom:mark_victim`, and draining the ring buffer — and performs the single `unsafe`
 //! decode of raw bytes into an `OomKillEvent`. It is the only place `aya` is referenced,
-//! which is why `aya`/`aya-log`/`libc` are optional deps gated on the `ebpf` feature.
+//! which is why `aya`/`libc` are optional deps gated on the `ebpf` feature.
 //! `ParkSource` is the no-op adapter for builds without that feature.
 
 #[cfg(feature = "ebpf")]
@@ -18,7 +18,6 @@ mod ebpf_source {
         programs::TracePoint,
         Ebpf,
     };
-    use aya_log::EbpfLogger;
     use log::{error, info, warn};
     use oom_watcher_common::OomKillEvent;
     use tokio::io::unix::AsyncFd;
@@ -64,10 +63,6 @@ mod ebpf_source {
                 "/oom-watcher-ebpf-object"
             )))?;
             info!("eBPF program loaded successfully");
-
-            if let Err(e) = EbpfLogger::init(&mut bpf) {
-                warn!("failed to initialize eBPF logger: {}", e);
-            }
 
             let program: &mut TracePoint = bpf
                 .program_mut("mark_victim")

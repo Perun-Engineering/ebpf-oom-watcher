@@ -12,7 +12,6 @@ path = "src/main.rs"
 oom-watcher-common = { path = "../oom-watcher-common" }
 
 aya-ebpf = { workspace = true }
-aya-log-ebpf = { workspace = true }
 
 [build-dependencies]
 which = { workspace = true }
