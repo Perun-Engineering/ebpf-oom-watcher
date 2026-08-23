@@ -55,6 +55,48 @@ fn extract_container_id(cgroup: &str) -> Option<String> {
     })
 }
 
+/// Match the bare container id lifted from the cgroup against the container statuses of
+/// the pods scheduled on this node, and lift the identity out of the entry that matched.
+///
+/// Split out from the API call so the matching rules are testable against constructed pod
+/// statuses, the same way [`extract_container_id`] is testable without a live `/proc`.
+///
+/// That status entry is the only place the runtime-prefixed container id and the image
+/// digest exist, which is also why there is no partially-filled identity: a container that
+/// does not match yields `None` and is counted as a resolution failure.
+fn identity_from_pods(pods: &[Pod], container_id: &str) -> Option<ContainerIdentity> {
+    pods.iter().find_map(|pod| {
+        // `?` here exits this closure, not the function — a pod without statuses is
+        // skipped and the search continues with the next one.
+        let statuses = pod.status.as_ref()?.container_statuses.as_ref()?;
+
+        let (status, container_id_full) = statuses.iter().find_map(|status| {
+            let full = status.container_id.as_deref()?;
+            // Container ID format: docker://abc123... or containerd://abc123...
+            (full.ends_with(container_id) || full.contains(container_id)).then_some((status, full))
+        })?;
+
+        Some(ContainerIdentity {
+            namespace: pod
+                .metadata
+                .namespace
+                .clone()
+                .unwrap_or_else(|| "default".to_string()),
+            pod_name: pod
+                .metadata
+                .name
+                .clone()
+                .unwrap_or_else(|| "unknown".to_string()),
+            container_name: status.name.clone(),
+            // Both ids are taken as the kubelet reported them, never reconstructed: these
+            // are the strings `kube_pod_container_info` carries, so emitting them verbatim
+            // is what makes the join work.
+            container_id: container_id_full.to_string(),
+            image_id: status.image_id.clone(),
+        })
+    })
+}
+
 pub struct KubernetesClient {
     pods_api: Api<Pod>,
     node_name: String,
@@ -138,42 +180,11 @@ impl KubernetesClient {
         let params = ListParams::default().fields(&format!("spec.nodeName={}", self.node_name));
         let pods = self.pods_api.list(&params).await?;
 
-        for pod in pods.items {
-            if let Some(status) = &pod.status {
-                if let Some(container_statuses) = &status.container_statuses {
-                    for container_status in container_statuses {
-                        if let Some(container_id_full) = &container_status.container_id {
-                            // Container ID format: docker://abc123... or containerd://abc123...
-                            if container_id_full.ends_with(container_id)
-                                || container_id_full.contains(container_id)
-                            {
-                                let namespace = pod
-                                    .metadata
-                                    .namespace
-                                    .clone()
-                                    .unwrap_or_else(|| "default".to_string());
-                                let pod_name = pod
-                                    .metadata
-                                    .name
-                                    .clone()
-                                    .unwrap_or_else(|| "unknown".to_string());
-                                let container_name = container_status.name.clone();
-
-                                return Ok(Some(ContainerIdentity {
-                                    namespace,
-                                    pod_name,
-                                    container_name,
-                                    container_id: container_id.to_string(),
-                                }));
-                            }
-                        }
-                    }
-                }
-            }
+        let identity = identity_from_pods(&pods.items, container_id);
+        if identity.is_none() {
+            warn!("Could not find pod info for container ID: {}", container_id);
         }
-
-        warn!("Could not find pod info for container ID: {}", container_id);
-        Ok(None)
+        Ok(identity)
     }
 }
 
@@ -195,6 +206,11 @@ impl ContainerResolver for KubernetesClient {
 
 #[cfg(test)]
 mod tests {
+    use k8s_openapi::{
+        api::core::v1::{ContainerStatus, PodStatus},
+        apimachinery::pkg::apis::meta::v1::ObjectMeta,
+    };
+
     use super::*;
 
     const ID: &str = "3b2f1c8e9d4a5b6c7e8f9a0b1c2d3e4f5a6b7c8d9e0f1a2b3c4d5e6f7a8b9c0d";
@@ -254,6 +270,129 @@ mod tests {
             None
         );
         assert_eq!(extract_container_id("0::/\n"), None);
+    }
+
+    /// A pod as the kubelet reports it: one container status carrying the runtime-prefixed
+    /// container id and the resolved image digest.
+    fn pod_with(container_id: &str, image_id: &str) -> Pod {
+        pod_with_statuses(vec![container_status("api", container_id, image_id)])
+    }
+
+    fn container_status(name: &str, container_id: &str, image_id: &str) -> ContainerStatus {
+        ContainerStatus {
+            name: name.to_string(),
+            container_id: Some(container_id.to_string()),
+            image_id: image_id.to_string(),
+            ..Default::default()
+        }
+    }
+
+    fn pod_with_statuses(container_statuses: Vec<ContainerStatus>) -> Pod {
+        Pod {
+            metadata: ObjectMeta {
+                namespace: Some("prod".to_string()),
+                name: Some("api-7d9".to_string()),
+                ..Default::default()
+            },
+            status: Some(PodStatus {
+                container_statuses: Some(container_statuses),
+                ..Default::default()
+            }),
+            ..Default::default()
+        }
+    }
+
+    #[test]
+    fn carries_the_kubelet_prefixed_container_id_not_the_bare_cgroup_id() {
+        let pods = [pod_with(&format!("containerd://{ID}"), "repo@sha256:abc")];
+
+        let identity = identity_from_pods(&pods, ID).expect("the container id matches");
+
+        // The pod status form is what `kube_pod_container_info` is built from, so emitting
+        // it makes the join hold by construction. The bare id from the cgroup would not.
+        assert_eq!(identity.container_id, format!("containerd://{ID}"));
+    }
+
+    #[test]
+    fn carries_the_image_id_verbatim() {
+        // Docker reports a `docker-pullable://` prefix where containerd reports a bare
+        // digest. Both must pass through untouched — `kube_pod_container_info` carries the
+        // same string, and any normalisation here breaks the join.
+        for image_id in [
+            "repo@sha256:2f1c8e9d4a5b6c7e",
+            "docker-pullable://repo@sha256:2f1c8e9d4a5b6c7e",
+        ] {
+            let pods = [pod_with(&format!("containerd://{ID}"), image_id)];
+
+            let identity = identity_from_pods(&pods, ID).expect("the container id matches");
+
+            assert_eq!(identity.image_id, image_id);
+        }
+    }
+
+    #[test]
+    fn resolves_a_container_whose_image_id_is_empty() {
+        // A container that never started has no image digest. It cannot be an OOM victim,
+        // but resolution must not fail on the empty string either.
+        let pods = [pod_with(&format!("containerd://{ID}"), "")];
+
+        let identity = identity_from_pods(&pods, ID).expect("an empty image id still resolves");
+
+        assert_eq!(identity.image_id, "");
+        assert_eq!(identity.container_name, "api");
+    }
+
+    #[test]
+    fn resolves_the_pod_and_container_names_alongside_the_ids() {
+        let pods = [pod_with(&format!("containerd://{ID}"), "repo@sha256:abc")];
+
+        let identity = identity_from_pods(&pods, ID).expect("the container id matches");
+
+        assert_eq!(identity.namespace, "prod");
+        assert_eq!(identity.pod_name, "api-7d9");
+        assert_eq!(identity.container_name, "api");
+    }
+
+    #[test]
+    fn picks_the_matching_container_among_several_in_one_pod() {
+        // A sidecar shares the pod, so the id is what selects the container — matching on
+        // the pod alone would attribute the kill to whichever status came first.
+        let other = "a".repeat(64);
+        let pods = [pod_with_statuses(vec![
+            container_status(
+                "sidecar",
+                &format!("containerd://{other}"),
+                "sidecar@sha256:1",
+            ),
+            container_status("api", &format!("containerd://{ID}"), "api@sha256:2"),
+        ])];
+
+        let identity = identity_from_pods(&pods, ID).expect("the container id matches");
+
+        assert_eq!(identity.container_name, "api");
+        assert_eq!(identity.image_id, "api@sha256:2");
+    }
+
+    #[test]
+    fn finds_nothing_when_no_container_on_the_node_matches() {
+        let pods = [pod_with(
+            &format!("containerd://{}", "b".repeat(64)),
+            "x@sha256:1",
+        )];
+
+        assert_eq!(identity_from_pods(&pods, ID), None);
+    }
+
+    #[test]
+    fn finds_nothing_when_a_pod_has_no_container_statuses_yet() {
+        // A pod accepted but not yet started has a status with no container statuses.
+        let pending = Pod {
+            status: Some(PodStatus::default()),
+            ..Default::default()
+        };
+        let no_status = Pod::default();
+
+        assert_eq!(identity_from_pods(&[pending, no_status], ID), None);
     }
 
     #[test]

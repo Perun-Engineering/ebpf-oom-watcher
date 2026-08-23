@@ -17,6 +17,25 @@ use crate::resolve::ResolutionOutcome;
 /// array of exactly this length, so adding a label here without its figure fails to build.
 const MEMORY_TYPES: [&str; 4] = ["total_vm", "anon_rss", "file_rss", "shmem_rss"];
 
+/// The labels identifying the container a kill is attributed to, in the order
+/// [`SeriesKey::labels`] returns them. Carried by both metrics keyed on it —
+/// `oom_kills_total` and `oom_last_timestamp` — and kept identical so the two join to
+/// each other directly rather than on a subset.
+///
+/// `container_id` is the kubelet's runtime-prefixed form and `image_id` the digest it
+/// resolved, which is what makes these joinable to `kube_pod_container_info` on a key more
+/// stable than pod name — a restarted pod in a Deployment gets a new name, but the ids
+/// still describe the thing that was killed. `image_id` is functionally determined by
+/// `container_id`, so it annotates these series without multiplying them.
+const PER_CONTAINER_LABELS: &[&str] = &[
+    "node",
+    "namespace",
+    "pod",
+    "container",
+    "container_id",
+    "image_id",
+];
+
 /// The memory figures of `raw`, in kilobytes, ordered to match [`MEMORY_TYPES`].
 fn memory_values(raw: &OomKillEvent) -> [u64; MEMORY_TYPES.len()] {
     [raw.total_vm, raw.anon_rss, raw.file_rss, raw.shmem_rss]
@@ -38,23 +57,59 @@ pub trait MetricsRecorder {
     fn record_dropped_total(&self, node: &str, total: u64);
 }
 
-/// The label set shared by every per-container metric, so one entry tracks the lifetime
-/// of all of them at once.
+/// The label set identifying one killed container, so one entry tracks the lifetime of
+/// every series describing it.
 ///
 /// The fields hold the labels *as recorded*, `unknown` fallbacks included — keying on the
 /// pre-fallback `Option`s would leave unresolved events unevictable.
+///
+/// `container_id` and `image_id` make this per *restart*, not per container name: a
+/// crashlooping pod mints a fresh key each time the runtime replaces the container. That
+/// is the point — the ids are what join to `kube_pod_container_info` — but it means
+/// `oom_memory_usage_bytes`, which is deliberately not keyed on them, is shared by every
+/// key with the same [`Self::memory_labels`] prefix. See [`MetricsCollector::evict_stale`].
 #[derive(Clone, PartialEq, Eq, Hash)]
 struct SeriesKey {
     node: String,
     namespace: String,
     pod: String,
     container: String,
+    container_id: String,
+    image_id: String,
 }
 
 impl SeriesKey {
     /// The label values in the order the metric families declare them.
-    fn labels(&self) -> [&str; 4] {
-        [&self.node, &self.namespace, &self.pod, &self.container]
+    fn labels(&self) -> [&str; 6] {
+        [
+            &self.node,
+            &self.namespace,
+            &self.pod,
+            &self.container,
+            &self.container_id,
+            &self.image_id,
+        ]
+    }
+
+    /// `oom_memory_usage_bytes` carries neither id, so it takes the leading four labels
+    /// plus its own `memory_type`.
+    fn memory_labels<'a>(&'a self, memory_type: &'a str) -> [&'a str; 5] {
+        [
+            &self.node,
+            &self.namespace,
+            &self.pod,
+            &self.container,
+            memory_type,
+        ]
+    }
+
+    /// Whether `other` describes the same container name, ignoring which restart it was —
+    /// i.e. whether the two share an `oom_memory_usage_bytes` series.
+    fn shares_memory_series_with(&self, other: &Self) -> bool {
+        self.node == other.node
+            && self.namespace == other.namespace
+            && self.pod == other.pod
+            && self.container == other.container
     }
 }
 
@@ -89,7 +144,7 @@ impl MetricsCollector {
 
         let oom_kills_total = CounterVec::new(
             prometheus::Opts::new("oom_kills_total", "Total number of OOM kills observed"),
-            &["node", "namespace", "pod", "container"],
+            PER_CONTAINER_LABELS,
         )
         .expect("Failed to create oom_kills_total metric");
 
@@ -113,7 +168,7 @@ impl MetricsCollector {
 
         let oom_last_timestamp = GaugeVec::new(
             prometheus::Opts::new("oom_last_timestamp", "Timestamp of the last OOM kill event"),
-            &["node", "namespace", "pod", "container"],
+            PER_CONTAINER_LABELS,
         )
         .expect("Failed to create oom_last_timestamp metric");
 
@@ -220,35 +275,43 @@ impl MetricsCollector {
             fresh
         });
 
+        // `retain` has already dropped the stale keys, so what remains is exactly the live
+        // set — the liveness test below must run against it, not against the map as it was
+        // before the scan, or a stale sibling would keep its own memory series alive.
         for key in &stale {
-            self.remove_series(key);
+            let memory_series_orphaned = !last_seen
+                .keys()
+                .any(|live| live.shares_memory_series_with(key));
+            self.remove_series(key, memory_series_orphaned);
         }
         stale.len()
     }
 
     /// Delete every series carrying `key`'s label set, and count the eviction.
     ///
+    /// `oom_memory_usage_bytes` is removed only when `memory_series_orphaned` — it is not
+    /// keyed on the two ids, so a crashlooping container's restarts all write to one
+    /// series and the earliest key going stale must not delete it out from under a live
+    /// one. It goes when the last key naming that container does.
+    ///
     /// `remove_label_values` errors when the series is absent, which is not a failure
     /// here — it means there was nothing left to delete.
-    fn remove_series(&self, key: &SeriesKey) {
+    fn remove_series(&self, key: &SeriesKey, memory_series_orphaned: bool) {
         let labels = key.labels();
 
         let _ = self.oom_kills_total.remove_label_values(&labels);
         let _ = self.oom_last_timestamp.remove_label_values(&labels);
 
-        let [node, namespace, pod, container] = labels;
-        for memory_type in MEMORY_TYPES {
-            let _ = self.oom_memory_usage_bytes.remove_label_values(&[
-                node,
-                namespace,
-                pod,
-                container,
-                memory_type,
-            ]);
+        if memory_series_orphaned {
+            for memory_type in MEMORY_TYPES {
+                let _ = self
+                    .oom_memory_usage_bytes
+                    .remove_label_values(&key.memory_labels(memory_type));
+            }
         }
 
         self.oom_series_evicted_total
-            .with_label_values(&[node])
+            .with_label_values(&[key.node.as_str()])
             .inc();
     }
 }
@@ -272,10 +335,11 @@ impl MetricsRecorder for MetricsCollector {
         let namespace = event.namespace.as_deref().unwrap_or("unknown");
         let pod = event.pod_name.as_deref().unwrap_or("unknown");
         let container = event.container_name.as_deref().unwrap_or("unknown");
+        let container_id = event.container_id.as_deref().unwrap_or("unknown");
+        let image_id = event.image_id.as_deref().unwrap_or("unknown");
+        let per_container = &[node, namespace, pod, container, container_id, image_id];
 
-        self.oom_kills_total
-            .with_label_values(&[node, namespace, pod, container])
-            .inc();
+        self.oom_kills_total.with_label_values(per_container).inc();
 
         self.oom_kills_per_node_total
             .with_label_values(&[node])
@@ -292,7 +356,7 @@ impl MetricsRecorder for MetricsCollector {
         }
 
         self.oom_last_timestamp
-            .with_label_values(&[node, namespace, pod, container])
+            .with_label_values(per_container)
             .set(event.timestamp as f64);
 
         // Touched last, so a series is only tracked once it exists. The event's own
@@ -307,6 +371,8 @@ impl MetricsRecorder for MetricsCollector {
                     namespace: namespace.to_string(),
                     pod: pod.to_string(),
                     container: container.to_string(),
+                    container_id: container_id.to_string(),
+                    image_id: image_id.to_string(),
                 },
                 event.timestamp,
             );
@@ -347,7 +413,8 @@ mod tests {
                 namespace: "p".into(),
                 pod_name: "po".into(),
                 container_name: "c".into(),
-                container_id: "id".into(),
+                container_id: "containerd://id".into(),
+                image_id: "repo@sha256:d".into(),
             }),
         );
 
@@ -387,6 +454,12 @@ mod tests {
 
     /// An enriched event for `pod` at `timestamp`, resolved to a container identity.
     fn event_at(pod: &str, timestamp: u64) -> EnrichedOomEvent {
+        event_for(pod, "containerd://abc123", timestamp)
+    }
+
+    /// As [`event_at`], but naming the container instance — two ids under one pod name are
+    /// the same container restarted, which is what a crashloop looks like here.
+    fn event_for(pod: &str, container_id: &str, timestamp: u64) -> EnrichedOomEvent {
         EnrichedOomEvent {
             raw_event: oom_watcher_common::OomKillEvent {
                 pid: 1234,
@@ -403,10 +476,18 @@ mod tests {
             namespace: Some("prod".into()),
             pod_name: Some(pod.into()),
             container_name: Some("api".into()),
-            container_id: Some("abc123".into()),
+            container_id: Some(container_id.into()),
+            image_id: Some("repo@sha256:def456".into()),
             timestamp,
         }
     }
+
+    /// Labels as Prometheus renders them: sorted, so the two ids land between `container`
+    /// and `namespace`.
+    const RESOLVED_LABELS: &str = concat!(
+        r#"{container="api",container_id="containerd://abc123","#,
+        r#"image_id="repo@sha256:def456",namespace="prod",node="node-1",pod="api-7d9"}"#
+    );
 
     const T0: u64 = 1_717_000_000;
     const TTL: u64 = 1_800;
@@ -431,7 +512,7 @@ mod tests {
 
         assert!(collector
             .get_metrics()
-            .contains("oom_kills_total{container=\"api\",namespace=\"prod\",node=\"node-1\",pod=\"api-7d9\"} 1"));
+            .contains(&format!("oom_kills_total{RESOLVED_LABELS} 1")));
     }
 
     #[test]
@@ -496,7 +577,7 @@ mod tests {
         // A counter reset is the correct reading: it is a different container.
         assert!(collector
             .get_metrics()
-            .contains("oom_kills_total{container=\"api\",namespace=\"prod\",node=\"node-1\",pod=\"api-7d9\"} 1"));
+            .contains(&format!("oom_kills_total{RESOLVED_LABELS} 1")));
     }
 
     #[test]
@@ -552,6 +633,99 @@ mod tests {
         assert_eq!(collector.evict_stale(T0 + TTL, TTL), 1);
 
         assert!(!collector.get_metrics().contains("pod=\"unknown\""));
+    }
+
+    #[test]
+    fn labels_oom_kills_total_with_the_container_and_image_ids() {
+        let collector = MetricsCollector::new();
+
+        collector.record_oom_event(&event_at("api-7d9", T0));
+
+        assert!(collector
+            .get_metrics()
+            .contains(&format!("oom_kills_total{RESOLVED_LABELS} 1")));
+    }
+
+    #[test]
+    fn labels_oom_last_timestamp_with_the_container_and_image_ids() {
+        // The two per-container metrics carry the same label set, so they join to each
+        // other without a `group_left` on a subset.
+        let collector = MetricsCollector::new();
+
+        collector.record_oom_event(&event_at("api-7d9", T0));
+
+        assert!(collector
+            .get_metrics()
+            .contains(&format!("oom_last_timestamp{RESOLVED_LABELS}")));
+    }
+
+    #[test]
+    fn leaves_the_memory_gauge_label_set_unchanged() {
+        // Already five labels, and memory at kill time is a property of the container, not
+        // of the image — the ids would multiply series here for no query anyone runs.
+        let collector = MetricsCollector::new();
+
+        collector.record_oom_event(&event_at("api-7d9", T0));
+
+        let out = collector.get_metrics();
+        assert!(out.contains(
+            r#"oom_memory_usage_bytes{container="api",memory_type="anon_rss",namespace="prod",node="node-1",pod="api-7d9"}"#
+        ));
+        assert!(!out
+            .lines()
+            .any(|l| l.starts_with("oom_memory_usage_bytes") && l.contains("container_id=")));
+    }
+
+    #[test]
+    fn falls_back_to_unknown_for_both_ids_when_resolution_failed() {
+        let collector = MetricsCollector::new();
+        let mut event = event_at("api-7d9", T0);
+        event.namespace = None;
+        event.pod_name = None;
+        event.container_name = None;
+        event.container_id = None;
+        event.image_id = None;
+
+        collector.record_oom_event(&event);
+
+        assert!(collector.get_metrics().contains(concat!(
+            r#"oom_kills_total{container="unknown",container_id="unknown","#,
+            r#"image_id="unknown",namespace="unknown",node="node-1",pod="unknown"} 1"#
+        )));
+    }
+
+    #[test]
+    fn keeps_the_memory_gauge_while_another_restart_of_the_container_is_live() {
+        // A crashlooping pod keeps its name and gets a new container id per restart, so
+        // each restart is its own key — but they all share one `oom_memory_usage_bytes`
+        // series, which is not keyed on the ids. Evicting the first restart must not take
+        // that series away from the second.
+        let collector = MetricsCollector::new();
+        collector.record_oom_event(&event_for("api-7d9", "containerd://restart-1", T0));
+        collector.record_oom_event(&event_for("api-7d9", "containerd://restart-2", T0 + TTL));
+
+        assert_eq!(collector.evict_stale(T0 + TTL, TTL), 1);
+
+        let out = collector.get_metrics();
+        assert!(!out.contains("containerd://restart-1"));
+        assert!(out.contains("containerd://restart-2"));
+        assert_eq!(
+            out.matches("oom_memory_usage_bytes{").count(),
+            MEMORY_TYPES.len()
+        );
+    }
+
+    #[test]
+    fn removes_the_memory_gauge_once_the_last_restart_goes_stale() {
+        let collector = MetricsCollector::new();
+        collector.record_oom_event(&event_for("api-7d9", "containerd://restart-1", T0));
+        collector.record_oom_event(&event_for("api-7d9", "containerd://restart-2", T0 + TTL));
+        collector.evict_stale(T0 + TTL, TTL);
+
+        // Now nothing names that container any more, so the shared series goes too.
+        assert_eq!(collector.evict_stale(T0 + 2 * TTL, TTL), 1);
+
+        assert!(!collector.get_metrics().contains("oom_memory_usage_bytes{"));
     }
 
     #[test]

@@ -206,7 +206,8 @@ mod tests {
             namespace: "prod".into(),
             pod_name: "api-7d9".into(),
             container_name: "api".into(),
-            container_id: "abc123".into(),
+            container_id: "containerd://abc123".into(),
+            image_id: "repo@sha256:def456".into(),
         }
     }
 

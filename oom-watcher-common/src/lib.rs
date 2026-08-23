@@ -33,13 +33,23 @@ pub struct OomKillEvent {
 ///
 /// Resolved from a PID by reading `/proc/<pid>/cgroup` for the container id, then
 /// matching that id against the pods scheduled on this node.
+///
+/// `container_id` and `image_id` are taken verbatim from the matched
+/// `containerStatuses` entry rather than reconstructed, because that is the same string
+/// `kube_pod_container_info` is built from — so joins against it hold by construction.
 #[cfg(feature = "user")]
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct ContainerIdentity {
     pub namespace: String,
     pub pod_name: String,
     pub container_name: String,
+    /// Runtime-prefixed, as the kubelet reports it: `containerd://<64-hex>`,
+    /// `docker://<64-hex>`, `cri-o://<64-hex>`. Not the bare id lifted from the cgroup.
     pub container_id: String,
+    /// The image digest the runtime resolved, verbatim — a bare `repo@sha256:…` under
+    /// containerd, `docker-pullable://repo@sha256:…` under Docker. Empty for a container
+    /// that never started, which cannot be an OOM victim but still parses.
+    pub image_id: String,
 }
 
 #[cfg(feature = "user")]
@@ -51,5 +61,6 @@ pub struct EnrichedOomEvent {
     pub pod_name: Option<String>,
     pub container_name: Option<String>,
     pub container_id: Option<String>,
+    pub image_id: Option<String>,
     pub timestamp: u64,
 }

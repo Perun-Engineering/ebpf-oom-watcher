@@ -12,8 +12,13 @@ use these terms exactly.
 
 - **Container identity** (`ContainerIdentity`) — the Kubernetes coordinates of the
   container a killed process belonged to: `namespace`, `pod_name`, `container_name`,
-  `container_id`. Resolved from a PID by reading `/proc/<pid>/cgroup` for the container
-  id, then matching it against the pods scheduled on this node.
+  `container_id`, `image_id`. Resolved from a PID by reading `/proc/<pid>/cgroup` for the
+  container id, then matching it against the pods scheduled on this node. The two ids are
+  taken verbatim from the matched `containerStatuses` entry — the runtime-prefixed
+  `containerd://<id>` form, not the bare id from the cgroup — because those are the
+  strings `kube_pod_container_info` carries, so metrics labelled with them join to it by
+  construction. There is no partially-filled identity: a container that cannot be matched
+  yields `None` and is counted as a resolution failure.
 
 - **Enrichment** — the step that takes a raw **OOM kill event** and a (possibly absent)
   **container identity** and produces an **enriched OOM event**. The single rule it
