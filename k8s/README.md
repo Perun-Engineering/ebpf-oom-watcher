@@ -24,8 +24,12 @@ The OOM Watcher exposes the following Prometheus metrics on port 8080:
 
 1. Kubernetes cluster with eBPF support
 2. Container runtime that supports cgroups v1 or v2
-3. A PodSecurity policy that permits `CAP_BPF`, `CAP_PERFMON` and `CAP_SYS_RESOURCE`
-   (the `baseline` profile does; `restricted` does not)
+3. A namespace at the `privileged` Pod Security level
+   (`pod-security.kubernetes.io/enforce: privileged`, or exempt — `kube-system` usually
+   is). `hostPID` and the hostPath mounts are forbidden by both `baseline` and
+   `restricted`, and `CAP_BPF`/`CAP_PERFMON`/`CAP_SYS_RESOURCE` are outside baseline's
+   capability allowlist. The container no longer running privileged is defence in depth;
+   it does not lower the admission tier the workload needs.
 
 ### Build and Deploy
 
