@@ -192,14 +192,17 @@ flowchart LR
         end
         subgraph user["Userland (oom-watcher, Tokio)"]
             B -->|epoll wakeup| R["RingBufSource\n(supervised worker)"]
-            R --> KC["KubernetesClient\nresolve(pid)"]
+            subgraph client["KubernetesClient"]
+                KC["resolve(pid)"]
+                PC[("PodCache\nreflector store")] -.->|"this node's pods,\nfrom memory"| KC
+            end
+            R --> KC
             KC --> M["MetricsCollector\nrecord_oom_event"]
             M --> H["/metrics :8080\n(supervised worker)"]
-            PC[("PodCache\n(supervised worker)")] -.->|"this node's pods,\nfrom memory"| KC
         end
     end
     D -.-> M
-    PC -.->|"one list + watch\n(spec.nodeName field selector)"| API["Kubernetes API"]
+    PC -.->|"one list + watch\n(spec.nodeName field selector,\nsupervised worker)"| API["Kubernetes API"]
     H -->|scrape| P["Prometheus\n(ServiceMonitor)"]
 ```
 

@@ -51,16 +51,16 @@ async fn main() -> anyhow::Result<()> {
                 "Successfully connected to Kubernetes API on node: {}",
                 client.node_name()
             );
-            (Some(client), cache_task)
+            (Some(client), Some(cache_task))
         }
         Err(e) => {
             warn!(
                 "Failed to connect to Kubernetes API: {}. Running in standalone mode.",
                 e
             );
-            // Standalone mode has no cache to feed. Park a task in its place so the
-            // supervising select! keeps one arm per worker either way.
-            (None, task::spawn(std::future::pending::<()>()))
+            // Standalone mode has no pods to mirror, so there is no cache task and nothing
+            // to supervise. Both are `None` together — the client is what owns the cache.
+            (None, None)
         }
     };
 
@@ -135,6 +135,9 @@ async fn main() -> anyhow::Result<()> {
     // Run until shutdown is requested or a worker task exits unexpectedly. If a worker
     // dies, return an error so the process exits non-zero and the DaemonSet restarts the
     // pod, rather than staying up but no longer watching.
+    //
+    // Read once, before the pod cache arm borrows the handle it guards.
+    let watching_pods = pod_cache.is_some();
     let outcome: anyhow::Result<()> = tokio::select! {
         res = shutdown_signal() => {
             res?;
@@ -153,7 +156,10 @@ async fn main() -> anyhow::Result<()> {
             error!("Series sweeper task exited unexpectedly: {:?}", res);
             Err(anyhow!("series sweeper task exited"))
         }
-        res = &mut pod_cache => {
+        // Disabled in standalone mode, where there is no cache task to wait on. The
+        // `expect` is unreachable for that reason, and it only runs if the arm is polled.
+        res = async { pod_cache.as_mut().expect("enabled only when the cache exists").await },
+              if watching_pods => {
             error!("Pod cache task exited unexpectedly: {:?}", res);
             Err(anyhow!("pod cache task exited"))
         }
@@ -162,7 +168,9 @@ async fn main() -> anyhow::Result<()> {
     event_processor.abort();
     metrics_server.abort();
     series_sweeper.abort();
-    pod_cache.abort();
+    if let Some(pod_cache) = &pod_cache {
+        pod_cache.abort();
+    }
 
     outcome
 }
