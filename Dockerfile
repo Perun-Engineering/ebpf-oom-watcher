@@ -14,7 +14,10 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
         libelf-dev \
         pkg-config \
     && rm -rf /var/lib/apt/lists/*
-RUN cargo install bpf-linker --locked && rustup component add rust-src
+# Pinned: bpf-linker 0.11.0 dropped aya-rustc-llvm-proxy and requires a system
+# LLVM 21-23 install. 0.10.4 links against the LLVM bundled with rustc, so no
+# system LLVM is needed. Unpinning requires installing matching LLVM dev packages.
+RUN cargo install bpf-linker --version 0.10.4 --locked && rustup component add rust-src
 ENV CARGO_TARGET_BPFEL_UNKNOWN_NONE_LINKER=bpf-linker
 WORKDIR /workspace
 
