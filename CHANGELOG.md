@@ -1,3 +1,10 @@
+## [0.4.1](https://github.com/Perun-Engineering/ebpf-oom-watcher/compare/v0.4.0...v0.4.1) (2026-08-23)
+
+
+### Bug Fixes
+
+* **metrics:** report the peak at OOM, not the last kill ([#78](https://github.com/Perun-Engineering/ebpf-oom-watcher/issues/78)) ([6ab7b5d](https://github.com/Perun-Engineering/ebpf-oom-watcher/commit/6ab7b5d91644550cdaeb64cfde1bd93764cc1bfd))
+
 # [0.4.0](https://github.com/Perun-Engineering/ebpf-oom-watcher/compare/v0.3.0...v0.4.0) (2026-08-23)
 
 
