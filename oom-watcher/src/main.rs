@@ -1,4 +1,5 @@
 mod enrich;
+mod health;
 mod http;
 mod kubernetes;
 mod metrics;
@@ -14,6 +15,7 @@ use std::{
 
 use anyhow::anyhow;
 use axum::serve;
+use health::Health;
 use kubernetes::KubernetesClient;
 use log::{error, info, warn};
 use metrics::MetricsCollector;
@@ -72,6 +74,9 @@ async fn main() -> anyhow::Result<()> {
 
     // Metrics recorder + its HTTP surface.
     let metrics_collector = Arc::new(MetricsCollector::new());
+    // Liveness state, shared between the watch loop (which stamps it) and `/healthz`
+    // (which reads it). See `health` for what a stale heartbeat does and does not prove.
+    let health = Arc::new(Health::new());
     let metrics_port = std::env::var("METRICS_PORT")
         .unwrap_or_else(|_| "8080".to_string())
         .parse::<u16>()
@@ -84,7 +89,11 @@ async fn main() -> anyhow::Result<()> {
         metrics_port
     );
     let listener = tokio::net::TcpListener::bind(&format!("0.0.0.0:{}", metrics_port)).await?;
-    let app = http::router(metrics_collector.clone());
+    let app = http::router(
+        metrics_collector.clone(),
+        health.clone(),
+        Arc::new(wall_clock_secs),
+    );
     let mut metrics_server = task::spawn(async move {
         if let Err(e) = serve(listener, app).await {
             error!("Metrics server error: {}", e);
@@ -108,18 +117,29 @@ async fn main() -> anyhow::Result<()> {
     // The watch loop owns the source and resolver and borrows the recorder for the life of
     // the task. It loops forever in production; the select! below supervises and aborts it.
     let recorder = metrics_collector.clone();
+    let loop_health = health.clone();
     let mut event_processor = task::spawn(async move {
         // Let the pod cache list before we start resolving against it. The probe is
         // already attached, so a kill during this window is held in the ring buffer and
         // resolves correctly once the list lands — where draining immediately would
         // report it against an empty cache. Waiting here rather than during startup is
-        // what keeps it off the critical path: `/metrics` is bound above (and doubles as
-        // the liveness probe), and this runs inside the supervised task, so a SIGTERM
-        // arriving mid-wait is still handled.
+        // what keeps it off the critical path: the HTTP surface is bound above, and this
+        // runs inside the supervised task, so a SIGTERM arriving mid-wait is still
+        // handled. `/healthz` reports `starting` for the duration.
         if let Some(client) = &k8s_client {
             client.wait_until_synced(CACHE_SYNC_TIMEOUT).await;
         }
-        watch::run(source, k8s_client, recorder.as_ref(), wall_clock_secs).await;
+        // Everything the loop needs is up, so liveness starts being asserted here rather
+        // than at bind time — `/healthz` answers 503 until this point.
+        loop_health.mark_started(wall_clock_secs());
+        watch::run(
+            source,
+            k8s_client,
+            recorder.as_ref(),
+            wall_clock_secs,
+            |at| loop_health.beat(at),
+        )
+        .await;
     });
 
     // Cardinality sweep. It has to be its own task rather than a step in the watch loop:
