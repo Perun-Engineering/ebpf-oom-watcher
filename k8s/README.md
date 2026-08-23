@@ -15,7 +15,7 @@ The OOM Watcher exposes the following Prometheus metrics on port 8080:
 
 - `oom_kills_total{node, namespace, pod, container}` - Total number of OOM kills
 - `oom_kills_per_node_total{node}` - Total OOM kills per node
-- `oom_memory_usage_bytes{node, namespace, pod, container, memory_type}` - Memory usage at OOM time
+- `oom_memory_usage_bytes{node, namespace, pod, container, memory_type}` - Peak memory usage at OOM time, per memory type
 - `oom_last_timestamp{node, namespace, pod, container}` - Timestamp of last OOM event
 
 ## Deployment
@@ -127,7 +127,7 @@ rate(oom_kills_total[5m]) > 0.1
 # OOM kills by namespace
 sum by (namespace) (oom_kills_total)
 
-# Memory usage trend before OOM
+# Peak memory at OOM by type
 oom_memory_usage_bytes{memory_type="anon_rss"}
 ```
 

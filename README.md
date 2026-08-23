@@ -47,11 +47,29 @@ The OOM Watcher exposes the following Prometheus metrics on port 8080:
 
 - `oom_kills_total{node, namespace, pod, container, container_id, image_id}` - Total number of OOM kills
 - `oom_kills_per_node_total{node}` - Total OOM kills per node
-- `oom_memory_usage_bytes{node, namespace, pod, container, memory_type}` - Memory usage at OOM time
+- `oom_memory_usage_bytes{node, namespace, pod, container, memory_type}` - Peak memory usage at OOM time (see [Peak, not last](#peak-not-last))
 - `oom_last_timestamp{node, namespace, pod, container, container_id, image_id}` - Timestamp of last OOM event
 - `oom_resolution_failures_total{node, reason}` - OOM events whose PID could not be resolved to a container (`reason` is `not_found` or `error`)
 - `oom_events_dropped_total{node}` - OOM events the probe could not enqueue because the ring buffer was full
 - `oom_series_evicted_total{node}` - Per-container series deleted after going stale (see [Series eviction](#series-eviction))
+
+### Peak, not last
+
+`oom_memory_usage_bytes` holds the **largest** figure seen for each `memory_type`, not the
+most recent one.
+
+One memcg OOM routinely kills more than one process — the one that hit the limit, then the
+container's init as it tears down. Both are the same container, so both write this label set,
+which carries no `container_id` to tell them apart. Keeping the last write let init's
+`anon_rss=0` overwrite a 64MB kill, so an alert on
+`oom_memory_usage_bytes{memory_type="anon_rss"}` read zero bytes for it.
+
+Each `memory_type` peaks independently, so one label set can pair one victim's `anon_rss`
+with another's `file_rss`. Read a series as "how large did this kind get", not as one
+process' snapshot.
+
+The peak spans the series' lifetime: [series eviction](#series-eviction) deletes it once the
+container stops being killed, and the next kill starts a fresh maximum from zero.
 
 ### Series eviction
 
@@ -65,7 +83,7 @@ Because `oom_kills_total` and `oom_last_timestamp` also carry `container_id`, a 
 pod produces one tracked series per *restart*, each expiring on its own schedule.
 `oom_memory_usage_bytes` carries no id, so every restart of the same container writes to one
 shared series — that one is deleted only when the last restart naming it goes stale, never
-out from under a container still being killed.
+out from under a container still being killed. Deleting it is also what resets its peak.
 
 The TTL must stay comfortably above your scrape interval. A series deleted before it is
 scraped takes its increments with it, unread.
@@ -106,7 +124,7 @@ sum by (namespace) (oom_kills_total)
 # Did the new build start OOMing?
 sum by (image_id) (increase(oom_kills_total{namespace="prod"}[24h]))
 
-# Memory usage at OOM by type
+# Peak memory at OOM by type
 oom_memory_usage_bytes{memory_type="anon_rss"}
 ```
 
