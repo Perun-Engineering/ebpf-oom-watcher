@@ -22,7 +22,7 @@ jobs:
           components: rustfmt, clippy, rust-src
 
       - name: Install bpf-linker
-        run: cargo install bpf-linker
+        run: cargo install bpf-linker --version 0.10.4 --locked
 
       - name: Cache cargo registry
         uses: actions/cache@v6.1.0
@@ -65,7 +65,7 @@ jobs:
           components: rust-src
 
       - name: Install bpf-linker
-        run: cargo install bpf-linker
+        run: cargo install bpf-linker --version 0.10.4 --locked
 
       - name: Cache cargo registry
         uses: actions/cache@v6.1.0
@@ -112,7 +112,7 @@ jobs:
         run: cargo install cross --git https://github.com/cross-rs/cross
 
       - name: Install bpf-linker
-        run: cargo install bpf-linker
+        run: cargo install bpf-linker --version 0.10.4 --locked
 
       - name: Cache cargo registry
         uses: actions/cache@v6.1.0
