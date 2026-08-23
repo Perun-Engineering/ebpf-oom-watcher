@@ -47,13 +47,26 @@ async fn main() -> anyhow::Result<()> {
 
     info!("Starting OOM Watcher with Kubernetes and Prometheus integration...");
 
+    // Metrics recorder + its HTTP surface. Built before the Kubernetes client because the
+    // pod cache reports deletions into it.
+    let metrics_collector = Arc::new(MetricsCollector::new());
+    // Liveness state, shared between the watch loop (which stamps it) and `/healthz`
+    // (which reads it). See `health` for what a stale heartbeat does and does not prove.
+    let health = Arc::new(Health::new());
+
     // Resolver for the watch loop: Some iff in-cluster. A failure drops us to standalone
     // mode (no node, no container identity) rather than aborting startup.
     //
     // The client comes with the task feeding its pod cache. That task is what keeps
     // resolution off the API server, so it is supervised like every other worker below —
-    // a cache nobody is feeding still answers, just with stale pods.
-    let (k8s_client, mut pod_cache) = match KubernetesClient::new().await {
+    // a cache nobody is feeding still answers, just with stale pods. It also reports pod
+    // deletions, which is what lets eviction follow pod lifecycle instead of only a timer.
+    let deletions = metrics_collector.clone();
+    let (k8s_client, mut pod_cache) = match KubernetesClient::new(move |namespace, pod| {
+        deletions.note_pod_deleted(namespace, pod, wall_clock_secs())
+    })
+    .await
+    {
         Ok((client, cache_task)) => {
             info!(
                 "Successfully connected to Kubernetes API on node: {}",
@@ -72,11 +85,6 @@ async fn main() -> anyhow::Result<()> {
         }
     };
 
-    // Metrics recorder + its HTTP surface.
-    let metrics_collector = Arc::new(MetricsCollector::new());
-    // Liveness state, shared between the watch loop (which stamps it) and `/healthz`
-    // (which reads it). See `health` for what a stale heartbeat does and does not prove.
-    let health = Arc::new(Health::new());
     let metrics_port = std::env::var("METRICS_PORT")
         .unwrap_or_else(|_| "8080".to_string())
         .parse::<u16>()

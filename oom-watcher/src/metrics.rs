@@ -17,6 +17,15 @@ use crate::resolve::ResolutionOutcome;
 /// array of exactly this length, so adding a label here without its figure fails to build.
 const MEMORY_TYPES: [&str; 4] = ["total_vm", "anon_rss", "file_rss", "shmem_rss"];
 
+/// How long a deleted pod's series survive the pod itself.
+///
+/// Same invariant as the eviction TTL, for the same reason: this must comfortably exceed
+/// the scrape interval, or a pod that OOMs and is deleted moments later loses the very
+/// increment that recorded it. The chart's `serviceMonitor.interval` defaults to 30s, so
+/// 120s is 4x headroom while still collapsing a deleted pod's cardinality in minutes
+/// rather than in the TTL's half hour.
+pub const DELETED_POD_GRACE_SECONDS: u64 = 120;
+
 /// The labels identifying the container a kill is attributed to, in the order
 /// [`SeriesKey::labels`] returns them. Carried by both metrics keyed on it —
 /// `oom_kills_total` and `oom_last_timestamp` — and kept identical so the two join to
@@ -136,6 +145,17 @@ pub struct MetricsCollector {
     /// elsewhere cannot leave timestamps logically inconsistent, and taking the watcher
     /// down over a poisoned bookkeeping map would lose real OOM events.
     last_seen: Mutex<HashMap<SeriesKey, u64>>,
+    /// Pods the API server has told us are gone, mapped to the wall-clock second at which
+    /// their series may be removed — `deletion time + `[`DELETED_POD_GRACE_SECONDS`].
+    ///
+    /// This is what makes eviction track pod lifecycle instead of only a timer. It holds a
+    /// *due time* rather than deleting on the spot because the P2-1 invariant still binds:
+    /// a series removed before it is scraped takes its increments with it, and a Job pod
+    /// that OOMs and is deleted seconds later is exactly that case.
+    ///
+    /// Keyed on `(namespace, pod)` because that is all a pod deletion identifies — the
+    /// container names and ids live in the [`SeriesKey`]s it matches.
+    deleted_after: Mutex<HashMap<(String, String), u64>>,
 }
 
 impl MetricsCollector {
@@ -232,6 +252,7 @@ impl MetricsCollector {
             oom_series_evicted_total,
             last_dropped_total: AtomicU64::new(0),
             last_seen: Mutex::new(HashMap::new()),
+            deleted_after: Mutex::new(HashMap::new()),
         }
     }
 
@@ -254,8 +275,51 @@ impl MetricsCollector {
     /// `ttl_secs` must comfortably exceed the scrape interval: a series deleted before it
     /// is scraped takes its increments with it. Node-scoped families are left alone; their
     /// cardinality is one series per process.
+    ///
+    /// The TTL is the backstop, not the only trigger: a pod the API server has deleted is
+    /// swept on its own schedule via [`Self::note_pod_deleted`], so cardinality tracks pod
+    /// lifecycle and only falls back to the timer for series nothing has told us about.
+    /// The API server says this pod is gone, so its series may go once
+    /// [`DELETED_POD_GRACE_SECONDS`] have passed and a final scrape has had its chance.
+    ///
+    /// Called from the pod cache's watch, which is why it only schedules: removal still
+    /// happens in [`Self::evict_stale`], so the `oom_memory_usage_bytes` orphan gate, the
+    /// lock discipline and `oom_series_evicted_total` all apply unchanged rather than
+    /// being reimplemented on a second deletion path.
+    ///
+    /// A container restarting does *not* reach here: a crashlooping pod keeps its pod
+    /// object, so the case P2-1 and P2-2 were built around is untouched by this.
+    pub fn note_pod_deleted(&self, namespace: &str, pod: &str, now: u64) {
+        let mut deleted_after = self.deleted_after.lock().unwrap_or_else(|e| e.into_inner());
+        deleted_after.insert(
+            (namespace.to_string(), pod.to_string()),
+            now.saturating_add(DELETED_POD_GRACE_SECONDS),
+        );
+    }
+
     pub fn evict_stale(&self, now: u64, ttl_secs: u64) -> usize {
-        // The guard is deliberately held across the removals below. Releasing it first
+        // Two locks are involved, so the order is fixed and never overlapping:
+        // `deleted_after` is taken, drained into a local, and released *before*
+        // `last_seen` is taken. Nothing ever holds both, so P2-1's no-cycle argument for
+        // the single mutex still stands as written.
+        //
+        // Draining every due entry — not only those matching a live series — is what
+        // bounds this map. The common case by far is a pod deleted without ever OOMing,
+        // which matches no key and would otherwise sit here for the life of the process.
+        let due: Vec<(String, String)> = {
+            let mut deleted_after = self.deleted_after.lock().unwrap_or_else(|e| e.into_inner());
+            let mut due = Vec::new();
+            deleted_after.retain(|pod, &mut removable_at| {
+                let pending = now < removable_at;
+                if !pending {
+                    due.push(pod.clone());
+                }
+                pending
+            });
+            due
+        };
+
+        // The guard below is deliberately held across the removals. Releasing it first
         // would let a concurrent `record_oom_event` land between the scan and the delete:
         // it would recreate the series and stamp a fresh last-seen time, then have that
         // series deleted underneath it — losing the increment and leaving a last-seen
@@ -268,11 +332,18 @@ impl MetricsCollector {
         // `saturating_sub` absorbs a backwards wall-clock step (an NTP correction), which
         // then reads as a fresh series and merely delays eviction by one sweep.
         last_seen.retain(|key, &mut seen| {
-            let fresh = now.saturating_sub(seen) < ttl_secs;
-            if !fresh {
+            let aged_out = now.saturating_sub(seen) >= ttl_secs;
+            // A deleted pod's series goes on the pod's schedule rather than the TTL's,
+            // however recently it was recorded — the container it describes cannot come
+            // back, so there is nothing left for the series to accumulate.
+            let pod_gone = due
+                .iter()
+                .any(|(namespace, pod)| key.namespace == *namespace && key.pod == *pod);
+            if aged_out || pod_gone {
                 stale.push(key.clone());
+                return false;
             }
-            fresh
+            true
         });
 
         // `retain` has already dropped the stale keys, so what remains is exactly the live
@@ -539,6 +610,117 @@ mod tests {
         assert!(collector
             .get_metrics()
             .contains(&format!("oom_kills_total{RESOLVED_LABELS} 1")));
+    }
+
+    #[test]
+    fn a_deleted_pods_series_goes_on_the_pods_schedule_not_the_ttls() {
+        let collector = MetricsCollector::new();
+        collector.record_oom_event(&event_at("api-7d9", T0));
+        collector.note_pod_deleted("prod", "api-7d9", T0);
+
+        // Nowhere near the TTL, but the pod is gone and the grace has passed.
+        assert_eq!(
+            collector.evict_stale(T0 + DELETED_POD_GRACE_SECONDS, TTL),
+            1
+        );
+
+        assert!(!collector.get_metrics().contains("api-7d9"));
+    }
+
+    /// The whole reason deletion schedules rather than deletes: a series removed before it
+    /// is scraped takes its increments with it, and a Job pod that OOMs and is deleted
+    /// seconds later is exactly that case.
+    #[test]
+    fn a_deleted_pods_series_survives_until_the_grace_has_passed() {
+        let collector = MetricsCollector::new();
+        collector.record_oom_event(&event_at("api-7d9", T0));
+        collector.note_pod_deleted("prod", "api-7d9", T0);
+
+        assert_eq!(
+            collector.evict_stale(T0 + DELETED_POD_GRACE_SECONDS - 1, TTL),
+            0
+        );
+
+        assert!(collector
+            .get_metrics()
+            .contains(&format!("oom_kills_total{RESOLVED_LABELS} 1")));
+    }
+
+    #[test]
+    fn deleting_a_pod_takes_every_restart_of_its_containers() {
+        let collector = MetricsCollector::new();
+        collector.record_oom_event(&event_for("api-7d9", "containerd://first", T0));
+        collector.record_oom_event(&event_for("api-7d9", "containerd://second", T0));
+        collector.note_pod_deleted("prod", "api-7d9", T0);
+
+        // Both restarts share one `oom_memory_usage_bytes` series; the pod going means the
+        // last key naming that container goes too, so the gauge is orphaned and removed.
+        assert_eq!(
+            collector.evict_stale(T0 + DELETED_POD_GRACE_SECONDS, TTL),
+            2
+        );
+
+        assert!(!collector.get_metrics().contains("oom_memory_usage_bytes{"));
+    }
+
+    #[test]
+    fn a_deleted_pod_leaves_another_pods_series_alone() {
+        let collector = MetricsCollector::new();
+        collector.record_oom_event(&event_at("api-7d9", T0));
+        collector.record_oom_event(&event_at("worker-1", T0));
+        collector.note_pod_deleted("prod", "api-7d9", T0);
+
+        assert_eq!(
+            collector.evict_stale(T0 + DELETED_POD_GRACE_SECONDS, TTL),
+            1
+        );
+
+        assert!(collector.get_metrics().contains("worker-1"));
+    }
+
+    /// The overwhelmingly common case — a pod deleted having never OOMed — matches no
+    /// series at all. Its bookkeeping entry still has to go, or the map grows for the life
+    /// of the process on any cluster that churns pods.
+    #[test]
+    fn forgets_a_deleted_pod_that_never_oomed() {
+        let collector = MetricsCollector::new();
+        collector.note_pod_deleted("prod", "never-oomed", T0);
+
+        assert_eq!(
+            collector.evict_stale(T0 + DELETED_POD_GRACE_SECONDS, TTL),
+            0
+        );
+
+        assert!(collector.deleted_after.lock().unwrap().is_empty());
+    }
+
+    #[test]
+    fn keeps_a_deleted_pods_bookkeeping_until_it_is_due() {
+        let collector = MetricsCollector::new();
+        collector.note_pod_deleted("prod", "never-oomed", T0);
+
+        assert_eq!(
+            collector.evict_stale(T0 + DELETED_POD_GRACE_SECONDS - 1, TTL),
+            0
+        );
+
+        assert_eq!(collector.deleted_after.lock().unwrap().len(), 1);
+    }
+
+    /// Two pods can share a name across namespaces; the deletion of one must not sweep the
+    /// other.
+    #[test]
+    fn distinguishes_pods_of_the_same_name_in_different_namespaces() {
+        let collector = MetricsCollector::new();
+        collector.record_oom_event(&event_at("api-7d9", T0));
+        collector.note_pod_deleted("staging", "api-7d9", T0);
+
+        assert_eq!(
+            collector.evict_stale(T0 + DELETED_POD_GRACE_SECONDS, TTL),
+            0
+        );
+
+        assert!(collector.get_metrics().contains("api-7d9"));
     }
 
     #[test]
