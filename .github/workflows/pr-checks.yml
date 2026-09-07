@@ -138,7 +138,7 @@ jobs:
       - uses: actions/checkout@v7
 
       - name: Set up Docker Buildx
-        uses: docker/setup-buildx-action@v4.2.0
+        uses: docker/setup-buildx-action@v4.3.0
 
       # The only job that links the eBPF probe and produces the artifact that actually
       # ships. `build` above passes --no-default-features, so nothing else on this workflow
