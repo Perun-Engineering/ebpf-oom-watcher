@@ -146,7 +146,7 @@ jobs:
       # until the release pipeline ran. Reads the release job's cache so it usually starts
       # warm; writes its own scope so a PR can never poison what release restores from.
       - name: Build the runtime image
-        uses: docker/build-push-action@v7.3.0
+        uses: docker/build-push-action@v7.4.0
         with:
           context: .
           file: ./Dockerfile
