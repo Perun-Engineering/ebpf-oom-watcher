@@ -1,5 +1,5 @@
 //! The watch loop: the per-event pipeline that turns OOM kill events into recorded,
-//! enriched OOM events. See CONTEXT.md ("Watch loop").
+//! enriched OOM events. See GLOSSARY.md ("Watch loop").
 //!
 //! [`run`] owns the whole loop, pulling from an [`OomEventSource`], resolving through a
 //! [`ContainerResolver`], and reporting to a [`MetricsRecorder`]. It is generic over all
